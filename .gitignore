@@ -1,0 +1,9 @@
+.venv/
+.venv312/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+saves/
+logs/
