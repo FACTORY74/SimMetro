@@ -127,6 +127,7 @@ function App() {
   rotationRef.current = facilityRotation;
   const [tool, setTool] = useState<Tool>("inspect");
   const [overlay, setOverlay] = useState<Overlay>("normal");
+  const [showTileBoundaries, setShowTileBoundaries] = useState(false);
   const [hover, setHover] = useState<Cell | null>(null);
   const [selected, setSelected] = useState<Cell | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
@@ -143,7 +144,7 @@ function App() {
   const lastSpeed = useRef<Exclude<Speed, 0>>("day");
   const map = useRef<HTMLDivElement>(null);
   const world = useRef<CityWorld | null>(null);
-  const [choice, setChoice] = useState<Partial<Record<Tool, string>>>({ ...defaultVariant, residential: "m" });
+  const [choice, setChoice] = useState<Partial<Record<Tool, string>>>({ ...defaultVariant, terrain: "raise", residential: "m" });
   const currentTool = useRef(tool);
   const currentChoice = useRef(choice);
   const locked = useRef(false);
@@ -193,9 +194,10 @@ function App() {
     const poll = async () => {
       const requestedAt = performance.now();
       try {
-        const view = world.current?.view() ?? { x: 128, z: 128, distance: 75 };
+        const view = world.current?.view() ?? { x: 50, z: 50, distance: 75, terrainShell: 1 };
         const query = new URLSearchParams(cursor.current.query().replace(/^\?/, ""));
         query.set("x", String(view.x)); query.set("z", String(view.z)); query.set("distance", String(Math.max(8, Math.min(900, view.distance))));
+        query.set("terrain_shell", String(view.terrainShell));
         const response = await fetch(`/api/view?${query}`, { signal: controller.signal });
         if (!response.ok) throw new Error(`Server returned ${response.status}`);
         const result = await response.json() as { state: RawCityState | UnchangedState; region: RegionView };
@@ -231,7 +233,8 @@ function App() {
         const chosen = currentTool.current;
         if (chosen === "inspect") return;
         void action(async () => {
-          const result = await request<{ cost: number; state: RawCityState }>("build", { tool: chosen, cells, variant: currentChoice.current[chosen] ?? null, district: district.current, rotation: rotationRef.current });
+          const operation = chosen === "terrain" ? currentChoice.current.terrain ?? "raise" : chosen;
+          const result = await request<{ cost: number; state: RawCityState }>("build", { tool: operation, cells, variant: chosen === "terrain" ? null : currentChoice.current[chosen] ?? null, district: district.current, rotation: rotationRef.current });
           accept(decodeState(result.state));
           notify(result.cost ? `Construction complete · ${dollars(result.cost)}` : "Nothing changed.");
         });
@@ -259,11 +262,12 @@ function App() {
     }, data => { setTraffic(data); world.current?.setTraffic(data); });
   }, [trafficRevision, session]);
   useEffect(() => {
-    world.current?.setTool(tool);
+    world.current?.setTool(tool === "terrain" ? ((choice.terrain as Tool | undefined) ?? "raise") : tool);
     if (tool === "pipe" || tool === "remove_pipe") setOverlay("water");
-  }, [tool]);
-  useEffect(() => { world.current?.setFacilityPlacement(choice.waterworks ?? "p", facilityRotation); }, [choice.waterworks, facilityRotation]);
+  }, [tool, choice.terrain]);
+  useEffect(() => { world.current?.setFacilityPlacement(choice.waterworks ?? "p", facilityRotation, choice.power ?? "c"); }, [choice.waterworks, choice.power, facilityRotation]);
   useEffect(() => { world.current?.setOverlay(overlay); }, [overlay]);
+  useEffect(() => { world.current?.setTileBoundaries(showTileBoundaries); }, [showTileBoundaries]);
   useEffect(() => {
     world.current?.setShowcase(showcase);
     if (showcase) setSelected(null);
@@ -287,7 +291,7 @@ function App() {
   }, [city, action, accept, showcase, powerReport]);
 
   const active = tools.find(t => t.id === tool)!;
-  const options = variants[tool as Kind];
+  const options = variants[tool as Kind | "terrain"];
   const option = options?.find(v => v.id === choice[tool]);
   const tile = city && selected ? city.tiles[selected.z * city.size + selected.x] : null;
   const tileVariant = tile ? variants[tile.kind]?.find(v => v.id === subtype(tile)) : undefined;
@@ -312,6 +316,16 @@ function App() {
       notify("Saved region restored.");
     });
   };
+  const newCity = () => {
+    if (!confirm("Start a new city? Unsaved changes in all districts will be lost.")) return;
+    void action(async () => {
+      accept(await requestState("new", {}));
+      world.current?.startingCity();
+      setRegion(null);
+      setSelected(null);
+      notify("New city started with a fresh landscape.");
+    });
+  };
   const history = city?.history ?? [];
   const maximum = Math.max(1, ...history.map(h => h.population));
   const points = history.map((h, i) => `${i * 220 / Math.max(1, history.length - 1)},${45 - h.population / maximum * 37}`).join(" ");
@@ -324,7 +338,7 @@ function App() {
       <div className="top-stat"><span>TREASURY</span><strong>{city ? dollars(city.money) : "—"}</strong></div>
       <div className="top-stat population"><span>RESIDENTS</span><strong>{number(city?.population ?? 0)}</strong></div>
       <div className="save-actions"><label className="save-name">Save slot<input aria-label="Save slot name" list="save-slots" value={saveName} maxLength={48}
-        onChange={e => setSaveName(e.target.value)} /><datalist id="save-slots">{savedNames.map(name => <option key={name} value={name} />)}</datalist></label><button onClick={save} disabled={!city || busy || !validSaveName || /^autosave-[123]$/.test(saveName)}>Save region</button><button onClick={load} disabled={!city || busy || !validSaveName}>Load</button></div>
+        onChange={e => setSaveName(e.target.value)} /><datalist id="save-slots">{savedNames.map(name => <option key={name} value={name} />)}</datalist></label><button onClick={save} disabled={!city || busy || !validSaveName || /^autosave-[123]$/.test(saveName)}>Save region</button><button onClick={load} disabled={!city || busy || !validSaveName}>Load</button><button onClick={newCity} disabled={!city || busy}>New City</button></div>
     </header>
 
     <aside className="tool-panel panel">
@@ -357,6 +371,7 @@ function App() {
         <div className="section-label">REGION EXPLORER</div>
         <div className="budget-row"><span>Focused district</span><strong>{city?.district.join(", ") ?? "0, 0"}</strong></div>
         <div className="budget-row"><span>Detailed simulation</span><span>{region?.detailed.length ?? 1} district(s)</span></div>
+        <div className="budget-row"><span>Cross-boundary commuters</span><span>{number(region?.mobility?.crossBoundary ?? 0)}</span></div>
         <div className="budget-row"><span>Explored / developed</span><span>{region?.explored ?? 1} / {region?.inhabited ?? 1}</span></div>
         <p className="muted">Pan beyond the edge to explore. Zoom out for the region; zoom in to build. Budget and services belong to the focused district.</p>
         <div className="region-actions"><button disabled={!city} onClick={() => world.current?.overview()}>Region view</button>
@@ -425,6 +440,8 @@ function App() {
           <option value="desirability">Desirability</option><option value="water">Water pipes &amp; supply</option><option value="power">Power grid</option><option value="access">Road access</option>
           <option value="elevation">Terrain elevation</option><option value="traffic">Traffic volume</option>
         </select>
+        <label className="layer-toggle"><input type="checkbox" checked={showTileBoundaries}
+          onChange={event => setShowTileBoundaries(event.target.checked)} /> Show simulation tile boundaries</label>
         {overlay !== "normal" && <p className="layer-help">{overlay === "desirability" ? "Red: below 40 / yellow: 40-49 / green: 50-69 / teal: 70+. Grey: not zoned. Suitability only; essential services and demand still apply." : overlay === "water" ? "Cyan: underground pipe / green: supplied / yellow: partial / red: shortage / grey: no consumer. Pipe colour takes precedence; inspect for supply." : overlay === "zones" ? "Green: homes · Blue: shops · Gold: industry" :
           overlay === "elevation" ? "Blue: below sea level · Sand: shore · Green to white: higher ground" :
           overlay === "traffic" ? "Daily peak: green quiet / yellow busy / red over each road type's capacity" :
@@ -477,7 +494,7 @@ function App() {
         <span className={tile.connected ? "positive" : "negative"}>{tile.connected ? "Road access" : "No road access"}</span></div>
     </section>}
 
-    <div className="map-caption"><span className="compass">N ↑</span><span>NEW HARBOURSIDE<br /><small>{city?.size ?? 256} × {city?.size ?? 256} · COASTAL REGION</small></span></div>
+    <div className="map-caption"><span className="compass">N ↑</span><span>NEW HARBOURSIDE<br /><small>{city?.size ?? 100} × {city?.size ?? 100} · COASTAL REGION</small></span></div>
     <footer className="bottom-bar panel">
       <div className="active-tool"><span className={`tool-icon ${active.id}`}>{active.icon}</span><div><strong>{active.label}{option ? ` · ${option.label}` : ""}</strong><p>{option ? `${option.detail}. ` : ""}{active.hint}</p></div></div>
       <div className="performance-metrics" aria-label="Live performance">

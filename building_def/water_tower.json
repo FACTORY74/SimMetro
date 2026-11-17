@@ -1,0 +1,15 @@
+{
+    "id":  "water.tower",
+    "kind":  "waterworks",
+    "variant":  "t",
+    "label":  "Water storage tower",
+    "constructionCost":  650,
+    "facility":  {
+                     "width":  2,
+                     "depth":  2,
+                     "upkeep":  15,
+                     "powerKw":  2,
+                     "productionPerDay":  0,
+                     "storage":  600
+                 }
+}

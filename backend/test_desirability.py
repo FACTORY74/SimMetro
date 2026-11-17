@@ -60,7 +60,9 @@ class DesirabilityTests(unittest.TestCase):
         self.assertEqual(long["commuteMinutes"], 40)
         self.assertEqual(short["target"]-long["target"], 15)
         failed = self.row(plan=plan([10, 10], ["", ""]))
-        self.assertEqual(short["target"]-failed["target"], 25)
+        # The nearby coal plant already depresses the lot close to the score
+        # floor, so only twenty of the failed-route penalty remains visible.
+        self.assertEqual(short["target"]-failed["target"], 20)
 
     def test_time_weighted_reliability_and_inspection_has_no_side_effects(self):
         city = self.city
@@ -99,7 +101,7 @@ class DesirabilityTests(unittest.TestCase):
         city.advance()
         self.assertEqual(city.at(13, 9).residents, before-before//10)  # Water loss, not water + reputation.
         self.assertTrue(self.row()["declining"])
-        city.build("power", [(10, 9)], "c")
+        city.build("power", [(10, 9)], "w")
         city.build("park", [(12, 11), (13, 11), (14, 11)])
         for _ in range(12):
             city.advance()

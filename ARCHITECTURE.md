@@ -2,7 +2,7 @@
 
 ## Goals
 
-SimMetro is a deterministic city simulation over streamed 256 x 256-cell districts.
+SimMetro is a deterministic city simulation over streamed 100 x 100-cell districts.
 The architecture must keep commands responsive, exploit multiple CPU cores where
 that produces measured gains, retain reproducible saves, and avoid making the UI
 wait for a complete simulation update.
@@ -23,6 +23,13 @@ to shared tiles.
 - `backend/workers.py` defines the persistent region-owner process protocol. City
   state crosses a process boundary only when ownership changes or a checkpoint is
   requested; ordinary advances remain inside the owning process.
+
+World coordinates are authoritative. `backend/world.py` derives storage chunk
+and local raster coordinates, supplies bounding-box queries, and indexes vector
+entities in every chunk they intersect without duplicating the authoritative
+entity. `backend/region.py` exposes the continuous `World`; `Region` remains a
+compatibility alias during migration. Its road components and labour markets
+cross loaded chunk edges.
 - `backend/app.py` is the FastAPI adapter, real-time clock and current coordination
   lock. Expensive encoding, compression, terrain generation and disk I/O occur off
   the event loop.
@@ -32,7 +39,8 @@ to shared tiles.
 
 Every materialised district is assigned an explicit activity level:
 
-- **HOT**: focused or camera-near. It receives ordinary fine-grained simulation.
+- **HOT**: the camera district and its eight neighbours. They receive ordinary
+  fine-grained simulation as one 3 x 3 active window.
 - **COLD**: developed but distant. Time is accumulated and dispatched in batches;
   detailed traffic rendering and snapshots are not produced.
 - **DORMANT**: empty, paused, or otherwise without scheduled simulation work.

@@ -5,6 +5,7 @@ import type { RegionTile, RegionView } from "./region.ts";
 import type { CityState } from "./types.ts";
 import { buildingModel } from "./buildings.ts";
 import { createSurface } from "./terrain.ts";
+import { levelRectangle } from "./selection.ts";
 
 function tile(step: number, x = 0): RegionTile {
   const size = 20;
@@ -96,4 +97,11 @@ test("neighbour desirability stays local and does not inherit the focused city's
   assert.equal(rendered.tiles[105]!.desirability?.score, 32);
   assert.deepEqual(rendered.tiles[105]!.desirability?.blockers, ["Desirability below 50"]);
   assert.equal(rendered.tiles[104]!.desirability, undefined);
+});
+
+test("terrain levelling preserves the drag origin as its reference tile", () => {
+  const cells = levelRectangle({ x: 8, z: 7 }, { x: 3, z: 2 });
+  assert.deepEqual(cells[0], { x: 8, z: 7 });
+  assert.equal(cells.length, 36);
+  assert.equal(new Set(cells.map(cell => `${cell.x}:${cell.z}`)).size, 36);
 });

@@ -4,6 +4,8 @@ An original, playable city-building prototype: a Python simulation and a
 texture-free, procedurally modelled Three.js city. No SimCity code or assets are
 used.
 
+![SimMetro city development progress](dev_progress/2026-11-14.png)
+
 See [the feature inventory and phased roadmap](ROADMAP.md) for the path from this
 prototype to a full-featured SC4-style city simulator, including completion gates.
 
@@ -46,7 +48,7 @@ after the first build so it mounts the generated UI.
 ## Play
 
 You begin with a small town and $24,000, set in the middle of a
-256 x 256 coastal district in a streamed region. Terrain supports levels -32 through +96: a western sea, inland lakes, beaches, rolling hills, and snowy peaks.
+100 x 100 coastal district in a streamed region. Terrain supports levels -32 through +96: a western sea, inland lakes, beaches, rolling hills, and snowy peaks.
 Neighbouring tiles never differ by more than one level, so roads and lots
 always follow the land. The starter streets do not extend to the district edge.
 Local roads support power, jobs, commuters and freight without a connection
@@ -117,10 +119,16 @@ verge in front of it, following the slope and staying clear of the lanes.
 
 ### Streamed districts and region view
 
-Each city district is **256 x 256 cells**. The starting town is district `(0, 0)`.
+Each city district is **100 x 100 cells**. The starting town is district `(0, 0)`.
 Pan across a boundary to generate and enter new, initially undeveloped districts;
 negative coordinates work too. **Region view** zooms out, and **Starting city**
 returns to the original district. Zoom back in to build and inspect.
+
+The camera's district is the focused simulation and its eight neighbours are
+materialised and run as a 3 x 3 active window. World coordinates are canonical:
+storage chunks are derived from them, roads join across loaded chunk edges, and
+employment is matched over the resulting continuous road components. Detailed
+vehicle animation remains focused near the camera.
 
 Detailed districts now load by distance from the view target to each district's
 bounds, before the camera crosses an edge. The loading radius grows from 96 to
@@ -159,16 +167,17 @@ simulation event loop. The cache is bounded, but memory and simulation cost stil
 grow with the number of **developed** districts; this is not yet a worker-based
 simulation of an arbitrarily populated world.
 
-Budgets, roads, power and employment are currently district-local; roads,
-commuters and power do not cross into neighbouring district networks.
+Budgets, power and water are currently chunk-local. Roads and labour markets
+cross loaded chunk boundaries; detailed vehicle routes are still rendered only
+for the focused chunk.
 Terraforming is rejected if any part of its slope cascade would change the outer
 row of a district, preserving shared terrain until cross-district transactions
 are implemented. Construction strokes never cross districts.
 
 Saves include the region's explored districts, generated-terrain basis, focused
-district and all retained city states. Old single-city 200 x 200 saves migrate by
-centring their original cells in a 256 x 256 district and extending their edge
-roads to the new boundaries. Existing files are not rewritten until you save. Generator versions are persisted:
+district and all retained city states. Older 200 x 200 and 256 x 256 city saves
+cannot fit into the smaller district and are rejected explicitly rather than
+cropped. Generator versions are persisted:
 old saves keep their original terrain and generation profile (including earlier
 Perlin versions) so development is not
 moved or submerged. Start a fresh region (restart the server without loading an
@@ -500,6 +509,12 @@ Headlight pools are flat and can dip into the ground on steep uphill slopes.
 
 ## Architecture
 
+Per-building balance data lives in `building_def/`, one JSON file per subtype.
+The backend validates these definitions at startup and derives zone capacity,
+jobs, power demand and generation, service coverage, water facilities and
+desirability profiles from them. `GET /api/buildings` exposes the same
+authoritative catalogue to clients.
+
 - `backend/simulation.py`: deterministic headless simulation, transactional
   construction, connectivity, demand, growth, budgets, and versioned save data.
 - `backend/app.py`: FastAPI endpoints and the real-time clock loop (every 0.25 s).
@@ -532,7 +547,7 @@ Headlight pools are flat and can dip into the ground on steep uphill slopes.
 
 ### Deliberate first-milestone limits
 
-Each district is 256 x 256 with integer terrain levels. Geometry is generated directly
+Each district is 100 x 100 with integer terrain levels. Geometry is generated directly
 in the browser, not loaded from OBJ/MTL or GLB files yet. There are no textures
 or external asset downloads. This prototype does not yet include transit, water
 quality/treatment, pollution, rivers, bridges, tunnels, per-road-type grade limits,

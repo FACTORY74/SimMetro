@@ -14,6 +14,7 @@ import type { Tree } from "./nature";
 import type { Cell, CityState, Overlay, Speed, Tile, Tool, TrafficData } from "./types";
 import { RegionRenderer, detailedCity } from "./region";
 import type { RegionView } from "./region";
+import { levelRectangle } from "./selection";
 
 const MAX_STROKE = 400;
 const COLUMN_BOTTOM = groundY(MIN_LEVEL) - .6;
@@ -59,7 +60,7 @@ const elevationStops: [number, THREE.Color][] = ([
   [-32, "#16337a"], [-1, "#4f9bd8"], [0, "#f4e6a2"], [16, "#62b45f"], [40, "#c6a44d"], [64, "#8a5a3c"], [96, "#ffffff"],
 ] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
 const previewColors: Partial<Record<Tool, string>> = {
-  inspect: "#ffffff", bulldoze: "#e46f57", raise: "#f6d77f", lower: "#79b8e0",
+  inspect: "#ffffff", bulldoze: "#e46f57", raise: "#f6d77f", lower: "#79b8e0", level: "#b9d7a3",
 };
 
 const SUN_LOW = new THREE.Color("#ffb070"), SUN_HIGH = new THREE.Color("#fff4df");
@@ -135,6 +136,10 @@ export class CityWorld {
   private lodDistanceScale = 1;
   private lowFpsFor = 0;
   private highFpsFor = 0;
+  private terrainShell = 1;
+  private lowTerrainFpsFor = 0;
+  private highTerrainFpsFor = 0;
+  private terrainShellAdjustedAt = 0;
   private lodAdjustedAt = 0;
   private lodRefreshedAt = 0;
   private readonly lodCamera = new THREE.Vector3(Number.POSITIVE_INFINITY, 0, 0);
@@ -163,6 +168,7 @@ export class CityWorld {
   private overlay: Overlay = "normal";
   private anchor: Cell | null = null;
   private hovered: Cell | null = null;
+  private selectedCell: Cell | null = null;
   private stroke: Cell[] = [];
   private frame = 0;
   private last = performance.now();
@@ -525,10 +531,12 @@ export class CityWorld {
   }
 
   private facilityVariant = "p";
+  private powerVariant = "c";
   private facilityRotation = 0;
-  setFacilityPlacement(variant: string, rotation: number) {
+  setFacilityPlacement(variant: string, rotation: number, powerVariant = this.powerVariant) {
     this.facilityVariant = variant;
     this.facilityRotation = rotation;
+    this.powerVariant = powerVariant;
     this.refreshPreview();
   }
   setTool(tool: Tool) {
@@ -536,17 +544,18 @@ export class CityWorld {
     this.anchor = null;
     this.stroke = [];
     this.refreshPreview();
+    if (this.city && this.detailed) this.buildDevelopment(this.city);
   }
 
   view() {
     const [x, z] = this.city?.district ?? [0, 0];
-    const size = this.city?.size ?? 256;
+    const size = this.city?.size ?? 100;
     return { x: this.controls.target.x + x * size, z: this.controls.target.z + z * size,
-      distance: this.camera.position.distanceTo(this.controls.target) };
+      distance: this.camera.position.distanceTo(this.controls.target), terrainShell: this.terrainShell };
   }
 
   centreDistrict() {
-    const centre = (this.city?.size ?? 256) / 2;
+    const centre = (this.city?.size ?? 100) / 2;
     const shift = new THREE.Vector3(centre, 0, centre).sub(this.controls.target);
     this.camera.position.add(shift); this.controls.target.add(shift);
   }
@@ -556,7 +565,7 @@ export class CityWorld {
   }
 
   startingCity() {
-    const [x, z] = this.city?.district ?? [0, 0], size = this.city?.size ?? 256;
+    const [x, z] = this.city?.district ?? [0, 0], size = this.city?.size ?? 100;
     this.controls.target.set(size / 2 - x * size, 0, size / 2 - z * size);
     this.camera.position.copy(this.controls.target).add(new THREE.Vector3(CAMERA_OFFSET.x, CAMERA_OFFSET.y, CAMERA_OFFSET.z));
   }
@@ -566,6 +575,10 @@ export class CityWorld {
     this.refreshNeighbours();
     const fog = this.scene.fog as THREE.Fog;
     fog.near = view.fogNear; fog.far = view.fogFar;
+  }
+
+  setTileBoundaries(visible: boolean) {
+    this.regionRenderer.setBoundaries(visible);
   }
 
   private refreshNeighbours() {
@@ -606,7 +619,21 @@ export class CityWorld {
       this.paintTerrain(this.city);
       this.buildDevelopment(this.city);
     }
+    this.setBuildingsGhosted(overlay === "desirability");
+    this.regionRenderer.setBuildingsGhosted(overlay === "desirability");
     for (const neighbour of this.neighbours.values()) neighbour.world.setOverlay(overlay);
+  }
+
+  private setBuildingsGhosted(ghosted: boolean) {
+    for (const mesh of [this.buildings, this.cylinders, this.panes, this.windRotors]) {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        material.transparent = ghosted;
+        material.opacity = ghosted ? .5 : 1;
+        material.depthWrite = !ghosted;
+        material.needsUpdate = true;
+      }
+    }
   }
 
   /** Server clock in minutes since the start of the month; extrapolated locally between polls. */
@@ -935,6 +962,13 @@ export class CityWorld {
       const model = buildingModel(tile, city.seed);
       return model ? buildingModelLod(model, tile, this.lodAt(tile.x + .5, tile.z + .5)) : null;
     });
+    const showsRadius = (tile: Tile) => {
+      const selected = this.tool === "inspect" && this.selectedCell?.x === tile.x && this.selectedCell?.z === tile.z;
+      if (selected) return tile.kind === "service" || tile.kind === "park" || tile.kind === "power" && ["c", "n"].includes(tile.variant);
+      return this.overlay === "desirability" && (tile.kind === "service" || tile.kind === "park" ||
+        tile.kind === "power" && ["c", "n"].includes(tile.variant) && (tile.installationPart ?? -1) === 0);
+    };
+    this.serviceRings = this.ensure(this.serviceRings, Math.max(1, city.tiles.filter(showsRadius).length));
     const required = models.reduce((sum, model) => sum + (model?.parts.filter(p => p.shape !== "cylinder").length ?? 0), 0);
     const roundRequired = models.reduce((sum, model) => sum + (model?.parts.filter(p => p.shape === "cylinder").length ?? 0), 0);
     this.buildings = this.ensure(this.buildings, required);
@@ -968,11 +1002,26 @@ export class CityWorld {
       const facilityHeights = tile.facility?.footprint.map(([x, z]) => surfaceY(city.tiles[z * city.size + x]!.height));
       const base = facilityHeights ? Math.max(...facilityHeights) : ground;
       const bottom = (facilityHeights ? Math.min(...facilityHeights) : ground) - FOUNDATION;
-      if (tile.kind === "service") {
+      if (showsRadius(tile)) {
         const service = subtype(tile);
-        const radius = service === "f" ? 12 : service === "p" ? 10 : 14;
-        this.color.set(service === "f" ? "#e2bc4f" : service === "p" ? "#5d8fd4" : "#65ad72");
-        place(this.serviceRings, serviceRings++, cx, ground + .035, cz, radius, 1, radius, this.color);
+        let radius = 2, ringX = cx, ringZ = cz;
+        if (tile.kind === "service") {
+          radius = service === "f" ? 12 : 10;
+          this.color.set(service === "f" ? "#e2bc4f" : service === "p" ? "#5d8fd4" : "#65ad72");
+        } else if (tile.kind === "power") {
+          radius = tile.variant === "n" ? 20 : 12;
+          if (tile.variant === "n") {
+            const part = Math.max(0, tile.installationPart ?? 0);
+            ringX = tile.x - part % 4 + 2; ringZ = tile.z - Math.floor(part / 4) + 2;
+          } else if ((tile.installationPart ?? -1) >= 0) {
+            const part = tile.installationPart!;
+            ringX = tile.x - part % 2 + 1; ringZ = tile.z - Math.floor(part / 2) + 1;
+          }
+          this.color.set(tile.variant === "n" ? "#d85d70" : "#9d6048");
+        } else {
+          this.color.set("#76bd69");
+        }
+        place(this.serviceRings, serviceRings++, ringX, ground + .035, ringZ, radius, 1, radius, this.color);
       }
       if (tile.kind === "park" || (tile.kind !== "powerline" && models[i])) {
         for (let side = 0; side < 4; side++) {
@@ -1289,7 +1338,7 @@ export class CityWorld {
   private cellsFor(a: Cell, b: Cell): Cell[] {
     if (this.tool === "road" || this.tool === "powerline" || this.tool === "pipe" || this.tool === "remove_pipe") return roadLine(a, b);
     if (this.tool === "power" || this.tool === "waterworks") return [b];
-    return rectangle(a, b);
+    return this.tool === "level" ? levelRectangle(a, b) : rectangle(a, b);
   }
 
   private refreshPreview() {
@@ -1307,6 +1356,12 @@ export class CityWorld {
           Math.max(...footprint.map(t => t?.height ?? 0)) - Math.min(...footprint.map(t => t?.height ?? 0)) > 1;
       }
       cells = [...cells, entrance];
+    } else if (this.tool === "power" && ["c", "n"].includes(this.powerVariant) && cells.length) {
+      const anchor = cells[cells.length - 1]!;
+      const size = this.powerVariant === "n" ? 4 : 2;
+      cells = Array.from({ length: size * size }, (_, i) => ({ x: anchor.x + i % size, z: anchor.z + Math.floor(i / size) }));
+      if (this.city) invalidFacility = cells.some(c => c.x < 0 || c.z < 0 || c.x >= this.city!.size || c.z >= this.city!.size ||
+        this.city!.tiles[c.z * this.city!.size + c.x]?.kind !== "empty" || this.city!.tiles[c.z * this.city!.size + c.x]?.water);
     }
     const city = this.city;
     let count = 0;
@@ -1315,10 +1370,10 @@ export class CityWorld {
         if (cell.x < 0 || cell.z < 0 || cell.x >= city.size || cell.z >= city.size) continue;
         const tile = city.tiles[cell.z * city.size + cell.x];
         if (!tile) continue;
-        const terraform = this.tool === "raise" || this.tool === "lower";
+        const terraform = this.tool === "raise" || this.tool === "lower" || this.tool === "level";
         const isEntrance = entrance === cell;
         const blocked = tile.water && !terraform && this.tool !== "inspect" ||
-          this.tool === "waterworks" && !isEntrance && invalidFacility;
+          (this.tool === "waterworks" && !isEntrance || this.tool === "power" && ["c", "n"].includes(this.powerVariant)) && invalidFacility;
         this.color.set(isEntrance ? (tile.kind === "road" ? "#8af595" : "#f0dc80") : blocked ? "#e0523d" : previewColors[this.tool] ?? colors[this.tool as keyof typeof colors] ?? "#ffffff");
         // Tall enough to stay visible above the uphill edge of a sloped tile.
         this.dummy.position.set(cell.x + .5, surfaceY(tile.height) + .08, cell.z + .5);
@@ -1334,10 +1389,12 @@ export class CityWorld {
   }
 
   private placeSelection(cell: Cell | null) {
+    this.selectedCell = cell;
     if (!cell || !this.city || this.showcase) { this.selection.visible = false; return; }
     const tile = this.city.tiles[cell.z * this.city.size + cell.x];
     this.selection.position.set(cell.x + .5, surfaceY(tile?.height ?? 0) + .25, cell.z + .5);
     this.selection.visible = true;
+    if (this.detailed) this.buildDevelopment(this.city);
   }
 
   private readonly pointerDown = (event: PointerEvent) => {
@@ -1407,7 +1464,7 @@ export class CityWorld {
   private readonly clearKeys = () => this.keys.clear();
 
   private groundInView(x: number, z: number): number | null {
-    const size = this.city?.size ?? 256;
+    const size = this.city?.size ?? 100;
     if (!this.detailDirty && this.surface && x >= 0 && z >= 0 && x <= size && z <= size)
       return Math.max(WATER_Y, this.surface.groundAt(x, z));
     for (const { world } of this.neighbours.values()) {
@@ -1421,7 +1478,7 @@ export class CityWorld {
   private readonly clampTarget = () => {
     const target = this.controls.target;
     const [cx, cz] = this.city?.district ?? [0, 0];
-    const size = this.city?.size ?? 256;
+    const size = this.city?.size ?? 100;
     const clamped = new THREE.Vector3(THREE.MathUtils.clamp(target.x, -1999000 - cx * size, 1999000 - cx * size),
       this.groundInView(target.x, target.z) ?? target.y, THREE.MathUtils.clamp(target.z, -1999000 - cz * size, 1999000 - cz * size));
     const shift = clamped.sub(target);
@@ -1556,6 +1613,33 @@ export class CityWorld {
     }
   }
 
+  /** Progressively add coarse, terrain-only region rings when there is sustained
+   * headroom. This is deliberately independent of building LOD adaptation. */
+  private adaptTerrainShell(fps: number, elapsedMs: number, now: number) {
+    if (this.shared || document.visibilityState !== "visible" || fps <= 0) {
+      this.lowTerrainFpsFor = this.highTerrainFpsFor = 0;
+      return;
+    }
+    if (fps < 45) {
+      this.lowTerrainFpsFor += elapsedMs / 1000;
+      this.highTerrainFpsFor = 0;
+    } else if (fps >= 52) {
+      this.highTerrainFpsFor += elapsedMs / 1000;
+      this.lowTerrainFpsFor = 0;
+    } else {
+      this.lowTerrainFpsFor = this.highTerrainFpsFor = 0;
+    }
+    if (this.terrainShell > 0 && this.lowTerrainFpsFor >= 4 && now - this.terrainShellAdjustedAt >= 4000) {
+      this.terrainShell -= 1;
+      this.lowTerrainFpsFor = 0;
+      this.terrainShellAdjustedAt = now;
+    } else if (this.terrainShell < 3 && this.highTerrainFpsFor >= 4 && now - this.terrainShellAdjustedAt >= 4000) {
+      this.terrainShell += 1;
+      this.highTerrainFpsFor = 0;
+      this.terrainShellAdjustedAt = now;
+    }
+  }
+
   private readonly animate = (now: number) => {
     this.frame = requestAnimationFrame(this.animate);
     this.reportedFrames += 1;
@@ -1598,6 +1682,7 @@ export class CityWorld {
       this.reported = now;
       this.reportedFrames = 0;
       this.adaptLodDistances(fps, elapsed, now);
+      this.adaptTerrainShell(fps, elapsed, now);
       this.onTick?.(active, clock, this.sim?.stats().queued ?? 0, this.sim?.fleet.peoplePerCar ?? 1, fps);
     }
     this.renderer.render(this.scene, this.camera);

@@ -1,0 +1,19 @@
+{
+    "id":  "commercial.office",
+    "kind":  "commercial",
+    "variant":  "o",
+    "label":  "Office",
+    "constructionCost":  10,
+    "maxLevel":  4,
+    "jobsPerLevel":  16,
+    "power":  {
+                  "peakKwPerLevel":  16,
+                  "profile":  "office"
+              },
+    "desirability":  {
+                         "profile":  "commercial",
+                         "parkWeight":  3,
+                         "parkCap":  12,
+                         "industryPenalty":  5
+                     }
+}

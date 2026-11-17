@@ -1,6 +1,6 @@
 export type Zone = "residential" | "commercial" | "industrial";
 export type Kind = Zone | "empty" | "road" | "power" | "park" | "powerline" | "waterworks" | "service";
-export type Tool = Exclude<Kind, "empty"> | "bulldoze" | "inspect" | "raise" | "lower" | "pipe" | "remove_pipe";
+export type Tool = Exclude<Kind, "empty"> | "bulldoze" | "inspect" | "terrain" | "raise" | "lower" | "level" | "pipe" | "remove_pipe";
 export type Overlay = "normal" | "power" | "access" | "zones" | "elevation" | "traffic" | "water" | "desirability";
 export type Speed = 0 | "day" | 1 | 3;
 export interface Cell { x: number; z: number }
@@ -21,6 +21,7 @@ export interface Tile extends Cell {
   powerSupply: number;
   powerGrid: number | null;
   batteryCharge: number;
+  installationPart?: number;
   facility?: WaterFacility;
   pipe?: boolean;
   waterService?: WaterService;
@@ -129,7 +130,7 @@ export interface RawCityState extends Omit<CitySummary, "trafficRevision" | "roa
   power_lines: [number, number][];
   tiles: { height: number[]; kind: string; variant: string; level: string; powered: string; connected: string;
     workers: number[]; residents: number[]; condition: number[]; traffic: number[];
-    power_demand: number[]; power_supply: number[]; power_grid: number[]; battery_charge: number[] };
+    power_demand: number[]; power_supply: number[]; power_grid: number[]; battery_charge: number[]; installation_part?: number[] };
 }
 export interface UnchangedState { unchanged: true; session: string; revision: number; clock: number }
 /** Daily trips, one column per field. Routes are N/E/S/W moves from the origin tile. */
@@ -168,6 +169,7 @@ export function decodeState(raw: RawCityState): CityState {
       powerDemand: tiles.power_demand[i]!, powerSupply: tiles.power_supply[i]!,
       powerGrid: tiles.power_grid[i] === -1 ? null : tiles.power_grid[i]!,
       batteryCharge: tiles.battery_charge[i]!,
+      installationPart: tiles.installation_part?.[i] ?? -1,
     })), raw.size, raw.water), raw.desirability),
   };
 }
@@ -185,8 +187,7 @@ export const tools: { id: Tool; label: string; key: string; icon: string; cost: 
   { id: "remove_pipe", label: "Remove pipes", key: "K", icon: "x~", cost: 1, hint: "Remove underground pipes only. Surface bulldozing leaves pipes intact." },
   { id: "park", label: "Park", key: "7", icon: "+", cost: 60, hint: "A little breathing room. Parks cost $8 per month to maintain." },
   { id: "bulldoze", label: "Bulldoze", key: "8", icon: "x", cost: 5, hint: "Remove development before replacing it. There are no refunds." },
-  { id: "raise", label: "Raise land", key: "9", icon: "▲", cost: 20, hint: "Lift empty land or fill water by one level. Nearby slopes adjust automatically." },
-  { id: "lower", label: "Lower land", key: "0", icon: "▼", cost: 20, hint: "Dig empty land down one level. Below sea level it becomes water." },
+  { id: "terrain", label: "Terrain", key: "9", icon: "△", cost: 20, hint: "Raise, lower, or level empty terrain. Nearby slopes adjust automatically." },
 ];
 export const colors: Record<Kind, string> = {
   empty: "#789c78", road: "#46535b", residential: "#6dc991",
@@ -205,11 +206,16 @@ export const zoneColor = (tile: Pick<Tile, "kind" | "variant">) =>
     : colors[tile.kind];
 export interface Variant { id: string; label: string; detail: string; cost?: number }
 /** Subtypes offered for each tool, in display order; mirrors VARIANTS in backend/simulation.py. */
-export const variants: Partial<Record<Kind, Variant[]>> = {
+export const variants: Partial<Record<Kind | "terrain", Variant[]>> = {
+  terrain: [
+    { id: "raise", label: "Raise", detail: "Lift empty land or fill water by one level" },
+    { id: "lower", label: "Lower", detail: "Dig empty land by one level; below sea level becomes water" },
+    { id: "level", label: "Level", detail: "Flatten the painted area to the first selected tile's elevation" },
+  ],
   service: [
     { id: "f", label: "Fire station", detail: "12-tile coverage · strongest for industry · $80/month", cost: 800 },
     { id: "p", label: "Police station", detail: "10-tile coverage · strongest for commerce · $90/month", cost: 900 },
-    { id: "e", label: "School", detail: "14-tile coverage · strongest for homes · $100/month", cost: 1000 },
+    { id: "e", label: "School", detail: "10-tile catchment · strongest for homes · $100/month", cost: 1000 },
   ],
   waterworks: [
     { id: "p", label: "Groundwater pump", detail: "2 x 1 footprint / 1,200 m3 per day / 12 kW / $60 per month", cost: 1000 },
@@ -244,7 +250,7 @@ export const variants: Partial<Record<Kind, Variant[]>> = {
     { id: "b", label: "Battery", detail: "1,200 kWh storage, 200 kW charge/discharge, $15/month", cost: 700 },
   ],
 };
-export const defaultVariant: Partial<Record<Kind, string>> = { service: "f", waterworks: "p", road: "r", residential: "h", commercial: "r", industrial: "m", power: "c" };
+export const defaultVariant: Partial<Record<Kind | "terrain", string>> = { terrain: "raise", service: "f", waterworks: "p", road: "r", residential: "h", commercial: "r", industrial: "m", power: "c" };
 /** Keyed by kind initial + subtype; mirror MAX_LEVEL and JOBS_PER_LEVEL in backend/simulation.py. */
 export const MAX_LEVEL: Record<string, number> = { rh: 4, rm: 3, rl: 2, cr: 3, co: 4, ce: 4, im: 4, it: 4, if: 3 };
 export const JOBS: Record<string, number> = { cr: 12, co: 16, ce: 10, im: 20, it: 14, if: 6 };

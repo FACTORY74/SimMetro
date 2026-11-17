@@ -11,6 +11,23 @@ from backend.simulation import City, SIZE
 
 
 class RegionTests(unittest.TestCase):
+    def test_adaptive_shell_adds_only_coarse_terrain(self):
+        region = Region(City(), workers=1)
+        outer = City(region.seed, heights=tuple([1] * (SIZE * SIZE)), starter=False)
+        outer.at(10, 10).kind = "road"
+        region.cities[(2, 0)] = outer
+        ordinary = region.view(SIZE / 2, SIZE / 2, 75)
+        expanded = region.view(SIZE / 2, SIZE / 2, 75, terrain_shell=1)
+        fullest = region.view(SIZE / 2, SIZE / 2, 75, terrain_shell=3)
+        self.assertEqual(len(ordinary["tiles"]), 9)
+        self.assertEqual(len(expanded["tiles"]), 25)
+        self.assertEqual(len(fullest["tiles"]), 81)
+        shell = [tile for tile in expanded["tiles"] if max(abs(tile["x"]), abs(tile["z"])) == 2]
+        self.assertTrue(shell)
+        self.assertTrue(all(tile["step"] == 4 for tile in shell))
+        self.assertTrue(all(not tile["buildings"] and "detail" not in tile for tile in shell))
+        self.assertTrue(all(SIZE % tile["step"] == 0 for tile in fullest["tiles"]))
+
     def test_bounded_executor_can_run_independent_hot_districts(self):
         region = Region(City(), workers=2)
         barrier = threading.Barrier(2)

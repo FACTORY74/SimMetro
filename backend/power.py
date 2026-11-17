@@ -6,6 +6,7 @@ not the independently accelerated monthly economy.
 
 from backend.facilities import FACILITIES
 from backend.services import SERVICES
+from backend.catalogue import definition, definitions
 from dataclasses import dataclass
 import math
 from typing import Protocol, Sequence
@@ -24,13 +25,9 @@ class Plant:
     storage: float = 0
 
 
-PLANTS = {
-    "c": Plant(800, 900, 180),
-    "s": Plant(180, 500, 40),
-    "n": Plant(4000, 4000, 450),
-    "w": Plant(120, 450, 25),
-    "b": Plant(200, 700, 15, 1200),
-}
+PLANTS = {variant: Plant(row["powerPlant"]["capacityKw"], row["constructionCost"],
+                         row["powerPlant"]["upkeep"], row["powerPlant"]["storageKwh"])
+          for (kind, variant), row in definitions().items() if kind == "power"}
 
 
 class PowerTile(Protocol):
@@ -88,13 +85,13 @@ def demand_kw(tile: PowerTile, minute: float) -> float:
     if not tile.level:
         return .15  # A small service connection allows an undeveloped zone to grow.
     if tile.kind == "residential":
-        return tile.level * 6 * interpolate(PROFILES["residential"], minute)
+        spec = definition("residential", tile.subtype)["power"]
+        return tile.level * spec["peakKwPerLevel"] * interpolate(PROFILES[spec["profile"]], minute)
     if tile.kind == "commercial":
-        profile = {"r": "retail", "o": "office", "e": "entertainment"}[tile.subtype]
-        peak = {"r": 12, "o": 16, "e": 20}[tile.subtype]
-        return tile.level * peak * interpolate(PROFILES[profile], minute)
-    peak = {"m": 26, "t": 20, "f": 5}[tile.subtype]
-    return tile.level * peak * interpolate(PROFILES["industrial"], minute)
+        spec = definition("commercial", tile.subtype)["power"]
+        return tile.level * spec["peakKwPerLevel"] * interpolate(PROFILES[spec["profile"]], minute)
+    spec = definition("industrial", tile.subtype)["power"]
+    return tile.level * spec["peakKwPerLevel"] * interpolate(PROFILES[spec["profile"]], minute)
 
 
 class PowerGrid:
@@ -152,7 +149,7 @@ class PowerGrid:
 
     def production(self, index: int, clock: float) -> float:
         tile = self.tiles[index]
-        if tile.kind != "power" or not tile.road_access or tile.subtype == "b":
+        if tile.kind != "power" or not tile.road_access or tile.subtype == "b" or tile.installation_part > 0:
             return 0
         factor = solar_factor(clock) if tile.subtype == "s" else wind_factor(clock, self.seed) if tile.subtype == "w" else 1
         return PLANTS[tile.subtype].capacity * factor
@@ -167,7 +164,8 @@ class PowerGrid:
                       discharging=0., solar=0., wind=0., coal=0., nuclear=0., capacity=0.)
         energized = 0
         for members in self.members.values():
-            plants = [i for i in members if self.tiles[i].kind == "power" and self.tiles[i].road_access]
+            plants = [i for i in members if self.tiles[i].kind == "power" and self.tiles[i].road_access
+                      and self.tiles[i].installation_part <= 0]
             batteries = [i for i in plants if self.tiles[i].subtype == "b"]
             demand = sum(self.loads[i] for i in members)
             generation = sum(self.outputs.get(i, 0) for i in plants)

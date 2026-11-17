@@ -1,0 +1,12 @@
+{
+    "id":  "power.solar",
+    "kind":  "power",
+    "variant":  "s",
+    "label":  "Solar power station",
+    "constructionCost":  500,
+    "powerPlant":  {
+                       "capacityKw":  180,
+                       "upkeep":  40,
+                       "storageKwh":  0
+                   }
+}

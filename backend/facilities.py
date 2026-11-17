@@ -1,5 +1,6 @@
 """Placed multi-cell facilities, independent of surface tile subtype encoding."""
 from dataclasses import asdict, dataclass
+from backend.catalogue import definitions
 
 
 @dataclass(frozen=True)
@@ -13,10 +14,11 @@ class FacilityType:
     storage: float = 0
 
 
-FACILITIES = {
-    "p": FacilityType(2, 1, 1000, 60, 12, production=1200),
-    "t": FacilityType(2, 2, 650, 15, 2, storage=600),
-}
+FACILITIES = {variant: FacilityType(row["facility"]["width"], row["facility"]["depth"],
+                                    row["constructionCost"], row["facility"]["upkeep"],
+                                    row["facility"]["powerKw"], row["facility"]["productionPerDay"],
+                                    row["facility"]["storage"])
+              for (kind, variant), row in definitions().items() if kind == "waterworks"}
 
 
 @dataclass

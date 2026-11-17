@@ -468,7 +468,33 @@ export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
       add(.27, .18, .035, .3, .36, .025, "#767d78");
       add(-.42, .32, .035, .025, .025, .02, tile.powered ? "#76d17b" : "#c9504f");
     } else if (sub === "n") {
-      name = "Nuclear power plant";
+      name = "Nuclear power station";
+      const installationPart = tile.installationPart ?? -1;
+      if (installationPart >= 0) {
+        // One model per footprint tile: together the sixteen tiles form a
+        // reactor complex instead of sixteen duplicated power stations.
+        add(0, 0, 0, .96, .96, .025, installationPart % 2 ? "#8f9692" : "#969d98");
+        if (installationPart === 5) {
+          for (let k = 0; k < 6; k++) round(0, 0, k * .075, .78 - k * .09, .075, "#e7e7e2");
+          round(0, 0, .45, .2, .08, "#d9d9d3");
+        } else if (installationPart === 2 || installationPart === 3) {
+          let y = .025;
+          for (let k = 0; k < 9; k++) {
+            const t = (k + .5) / 9, d = .78 * (.64 + .36 * ((t - .68) / .68) ** 2);
+            round(0, 0, y, d, .13, k % 3 === 2 ? "#d8d8d2" : "#e6e5df"); y += .13;
+          }
+          chimneys.push({ x: 0, z: 0, top: y, width: .5, always: true, steam: true });
+        } else if ([8, 9, 12, 13].includes(installationPart)) {
+          const office = block(0, 0, .72, .72, .025, installationPart < 12 ? .42 : .3, "#b9c2c6");
+          work(office, { storey: .15, spacing: .14 }); parapet(office);
+        } else if (installationPart === 6 || installationPart === 10) {
+          const turbine = block(0, 0, .82, .68, .025, .38, "#aeb8bc");
+          work(turbine, { storey: .19, faces: [1, 2, 3], spacing: .13 }); parapet(turbine);
+        } else {
+          add(0, 0, .025, .7, .08, .035, "#d8c85d");
+          add(0, 0, .06, .08, .7, .035, "#d8c85d");
+        }
+      } else {
       // Two hyperboloid cooling towers: wide base, waist two-thirds up, flared lip.
       for (const x of [-.24, .24]) {
         let y = 0;
@@ -488,8 +514,10 @@ export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
       work(turbine, { storey: .17, faces: [1, 2], spacing: .12 });
       add(.2, .28, .34, .48, .32, .03, "#7d8b92");
       add(.43, -.44, 0, .04, .04, .5, "#c9372c");
+      }
     } else {
       name = "Coal power station";
+      if ((tile.installationPart ?? -1) <= 0) {
       // A brick generating hall with a taller boiler house and a white chimney rising from each corner tower.
       const BRICKS = "#9a5c47", DEEP = "#7e4a3a", WHITE = "#efede6";
       const hall = block(0, -.1, .78, .5, 0, .62, BRICKS);
@@ -517,6 +545,21 @@ export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
       add(.22, .26, .06, .05, .26, .03, DARK);
       add(.22, .4, 0, .03, .03, .06, DARK);
       add(.36, .38, 0, .14, .16, .1, "#c9c4b8");
+      if ((tile.installationPart ?? -1) === 0) {
+        for (const part of parts) {
+          part.x = part.x * 2 + .5; part.z = part.z * 2 + .5;
+          part.bottom *= 2; part.width *= 2; part.depth *= 2; part.height *= 2;
+        }
+        for (const pane of windows) {
+          pane.x = pane.x * 2 + .5; pane.z = pane.z * 2 + .5;
+          pane.y *= 2; pane.width *= 2; pane.height *= 2;
+        }
+        for (const stack of chimneys) {
+          stack.x = stack.x * 2 + .5; stack.z = stack.z * 2 + .5;
+          stack.top *= 2; stack.width *= 2;
+        }
+      }
+      }
     }
   } else if (!legacy && kind === "commercial" && sub === "o") {
     if (level === 1) {
@@ -1241,7 +1284,7 @@ export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
     add(-.31, .37, 0, .15, .12, .1, "#71685b");
   }
   // Quarter turns diversify streetscapes without changing lot footprints.
-  if ((variation >>> 8) % 2 && !(kind === "power" && sub === "w")) {
+  if ((variation >>> 8) % 2 && !(kind === "power" && (sub === "w" || sub === "c" && tile.installationPart === 0))) {
     for (const part of parts) {
       [part.x, part.z] = [-part.z, part.x];
       [part.width, part.depth] = [part.depth, part.width];

@@ -1,0 +1,12 @@
+{
+    "id":  "power.wind",
+    "kind":  "power",
+    "variant":  "w",
+    "label":  "Wind turbine",
+    "constructionCost":  450,
+    "powerPlant":  {
+                       "capacityKw":  120,
+                       "upkeep":  25,
+                       "storageKwh":  0
+                   }
+}

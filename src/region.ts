@@ -5,7 +5,7 @@ import { attachDesirability, type DesirabilityData, attachWater, type WaterData,
 
 export interface DistrictDetail {
   seed: number; heights: number[]; terrainRevision: number; stamp: string;
-  lots: [number, number, Kind, string, number, number, number, boolean, boolean, number][];
+  lots: [number, number, Kind, string, number, number, number, boolean, boolean, number, number?][];
   desirability?: DesirabilityData;
   water?: WaterData;
   powerLines: [number, number][];
@@ -26,17 +26,20 @@ export function detailedCity(tile: RegionTile, focus: CityState): CityState {
   const tiles: Tile[] = data.heights.map((height, i) => ({
     x: i % focus.size, z: Math.floor(i / focus.size), height, water: height < 0,
     kind: "empty", variant: "", level: 0, condition: 100, workers: 0, residents: 0,
-    powered: false, connected: false, traffic: 0, powerDemand: 0, powerSupply: 0,
+    powered: false, connected: false, traffic: 0, powerDemand: 0, powerSupply: 0, installationPart: -1,
     powerGrid: null, batteryCharge: 0,
   }));
-  for (const [x, z, kind, variant, level, condition, workers, powered, connected, residents] of data.lots)
-    Object.assign(tiles[z * focus.size + x]!, { kind, variant, level, condition, workers, powered, connected, residents });
+  for (const [x, z, kind, variant, level, condition, workers, powered, connected, residents, installationPart] of data.lots)
+    Object.assign(tiles[z * focus.size + x]!, { kind, variant, level, condition, workers, powered, connected, residents, installationPart });
   return { ...focus, desirability: data.desirability, water: data.water, district: [tile.x, tile.z], seed: data.seed, tiles: attachDesirability(attachWater(tiles, focus.size, data.water), data.desirability),
     terrainRevision: data.terrainRevision, terrainEdges: data.edges ?? null, powerLines: data.powerLines, trafficRevision: -1 };
 }
 export interface RegionView {
   size: number; focus: [number, number]; detailed: [number, number][];
+  coordinateSystem?: "world"; activeBounds?: [number, number, number, number];
+  mobility?: { commuters: number; crossBoundary: number; averageWorldDistance: number };
   explored: number; inhabited: number; tiles: RegionTile[];
+  terrainShell?: number;
   fogNear: number; fogFar: number;
   activity?: { hot: number; cold: number; dormant: number }; workers?: number;
   performance?: { updatesPerSecond: number; simulationMs: number };
@@ -100,8 +103,49 @@ export class RegionRenderer {
   private readonly buildingMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
   private readonly box = new THREE.BoxGeometry(1, 1, 1);
   private tiles = new Map<string, { stamp: string; group: THREE.Group; terrain: THREE.Mesh; buildings: THREE.InstancedMesh }>();
+  private readonly boundaryMaterial = new THREE.LineBasicMaterial({ color: "#fff2a8", transparent: true, opacity: .85 });
+  private readonly boundaries = new THREE.Group();
+  private showBoundaries = false;
+
+  setBoundaries(visible: boolean) {
+    this.showBoundaries = visible;
+    if (visible && this.boundaries.parent !== this.group) this.group.add(this.boundaries);
+    if (!visible && this.boundaries.parent === this.group) this.group.remove(this.boundaries);
+  }
+
+  setBuildingsGhosted(ghosted: boolean) {
+    this.buildingMaterial.transparent = ghosted;
+    this.buildingMaterial.opacity = ghosted ? .5 : 1;
+    this.buildingMaterial.depthWrite = !ghosted;
+    this.buildingMaterial.needsUpdate = true;
+  }
+
+  private rebuildBoundaries(view: RegionView) {
+    this.boundaries.clear();
+    for (const tile of view.tiles) {
+      const positions: number[] = [];
+      const edge = (values: number[], side: number) => {
+        for (let i = 0; i < values.length - 1; i++) {
+          const a = i / 2, b = (i + 1) / 2, y1 = values[i]! * LEVEL_HEIGHT + .08, y2 = values[i + 1]! * LEVEL_HEIGHT + .08;
+          if (side === 0) positions.push(a, y1, 0, b, y2, 0);
+          else if (side === 1) positions.push(view.size, y1, a, view.size, y2, b);
+          else if (side === 2) positions.push(a, y1, view.size, b, y2, view.size);
+          else positions.push(0, y1, a, 0, y2, b);
+        }
+      };
+      tile.edges.forEach(edge);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      const line = new THREE.LineSegments(geometry, this.boundaryMaterial);
+      line.position.set((tile.x - view.focus[0]) * view.size, 0, (tile.z - view.focus[1]) * view.size);
+      this.boundaries.add(line);
+    }
+    if (this.showBoundaries && this.boundaries.parent !== this.group) this.group.add(this.boundaries);
+  }
 
   update(view: RegionView, detailed: boolean, neighbours: ReadonlySet<string> = new Set()) {
+    for (const child of this.boundaries.children) (child as THREE.LineSegments).geometry.dispose();
+    this.rebuildBoundaries(view);
     const wanted = new Set<string>();
     for (const tile of view.tiles) {
       const key = `${tile.x}:${tile.z}`;
@@ -140,6 +184,8 @@ export class RegionRenderer {
 
   dispose() {
     for (const key of this.tiles.keys()) this.remove(key);
+    for (const child of this.boundaries.children) (child as THREE.LineSegments).geometry.dispose();
+    this.boundaryMaterial.dispose();
     this.ground.dispose(); this.buildingMaterial.dispose(); this.box.dispose();
   }
 }

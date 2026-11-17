@@ -1,0 +1,12 @@
+{
+    "id":  "power.battery",
+    "kind":  "power",
+    "variant":  "b",
+    "label":  "Grid battery",
+    "constructionCost":  700,
+    "powerPlant":  {
+                       "capacityKw":  200,
+                       "upkeep":  15,
+                       "storageKwh":  1200
+                   }
+}

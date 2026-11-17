@@ -1,0 +1,17 @@
+{
+    "id":  "service.police",
+    "kind":  "service",
+    "variant":  "p",
+    "label":  "Police station",
+    "constructionCost":  900,
+    "service":  {
+                    "upkeep":  90,
+                    "powerKw":  12,
+                    "radius":  10,
+                    "desirabilityPoints":  {
+                                               "residential":  6,
+                                               "commercial":  8,
+                                               "industrial":  4
+                                           }
+                }
+}

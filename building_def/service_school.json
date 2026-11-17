@@ -1,0 +1,17 @@
+{
+    "id":  "service.school",
+    "kind":  "service",
+    "variant":  "e",
+    "label":  "School",
+    "constructionCost":  1000,
+    "service":  {
+                    "upkeep":  100,
+                    "powerKw":  14,
+                    "radius":  10,
+                    "desirabilityPoints":  {
+                                               "residential":  10,
+                                               "commercial":  3,
+                                               "industrial":  2
+                                           }
+                }
+}

@@ -1,0 +1,19 @@
+{
+    "id":  "industrial.manufacturing",
+    "kind":  "industrial",
+    "variant":  "m",
+    "label":  "Manufacturing",
+    "constructionCost":  10,
+    "maxLevel":  4,
+    "jobsPerLevel":  20,
+    "power":  {
+                  "peakKwPerLevel":  26,
+                  "profile":  "industrial"
+              },
+    "desirability":  {
+                         "profile":  "manufacturing",
+                         "parkWeight":  0,
+                         "parkCap":  0,
+                         "industryPenalty":  0
+                     }
+}

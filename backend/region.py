@@ -1,18 +1,22 @@
-"""Streamed 256-cell districts. Unvisited land is deterministic, not a live City.
+"""Streamed 100-cell districts. Unvisited land is deterministic, not a live City.
 
 Only inhabited or recently focused districts need mutable simulation records.
 District road and utility networks are currently independent.
 """
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from enum import Enum
 import math
 import os
 import sys
 from uuid import uuid4
 
-from backend.simulation import City, SIZE, MIN_HEIGHT, MAX_HEIGHT, legacy_generate_heights, limit_slopes, _hash, _smooth
-from backend.terrain import GENERATOR_VERSION, PERLIN_GENERATORS, world_heights, world_edges
+from backend.simulation import (BUSINESSES, ZONES, COSTS, TERRAFORM, MAX_TERRAFORM_TILES,
+                                City, SIZE, MIN_HEIGHT, MAX_HEIGHT, legacy_generate_heights,
+                                limit_slopes, _hash, _smooth)
+from backend.terrain import GENERATOR_VERSION, PERLIN_GENERATORS, world_heights
+from backend.world import Bounds, ChunkCoord, SpatialIndex, WorldCell, group_by_chunk, world_cell
 
 
 def district_at(x: float, z: float) -> tuple[int, int]:
@@ -20,8 +24,9 @@ def district_at(x: float, z: float) -> tuple[int, int]:
 
 
 def detailed_districts(x: float, z: float) -> set[tuple[int, int]]:
-    # A 24-cell focus footprint can straddle at most four districts.
-    return {district_at(x + dx, z + dz) for dx in (-12, 12) for dz in (-12, 12)}
+    """The camera's district and its eight immediate neighbours."""
+    cx, cz = district_at(x, z)
+    return {(cx + dx, cz + dz) for dz in (-1, 0, 1) for dx in (-1, 0, 1)}
 
 
 def visible_detail(x: float, z: float, distance: float, previous=()) -> set[tuple[int, int]]:
@@ -114,7 +119,7 @@ def terrain(seed: int, cx: int, cz: int, base: tuple[int, ...] | None = None, ge
     return tuple(limit_slopes([min(a, b) for a, b in zip(heights, ceiling)]))
 
 
-class Region:
+class World:
     def __init__(self, city: City, *, workers: int | None = None):
         self.seed = city.seed
         self.generator = city.terrain_generator
@@ -131,6 +136,10 @@ class Region:
         self.render_id = uuid4().hex
         self.workers = recommended_workers() if workers is None else max(1, workers)
         self._executor: ThreadPoolExecutor | None = None
+        # Vector entities live here once and may be indexed by several chunks.
+        self.entities: SpatialIndex[object] = SpatialIndex(SIZE)
+        self._workforce_signature: tuple | None = None
+        self.mobility = {"commuters": 0, "crossBoundary": 0, "averageWorldDistance": 0.0}
 
     def activity(self, key: tuple[int, int]) -> Activity:
         city = self.cities.get(key)
@@ -170,6 +179,257 @@ class Region:
     def city(self):
         return self.cities[self.focus]
 
+    def tile_at(self, x: int, z: int):
+        """Resolve an absolute world cell through the loaded chunk map."""
+        cell = WorldCell(x, z)
+        chunk = cell.chunk(SIZE)
+        city = self.cities.get((chunk.x, chunk.z))
+        if city is None:
+            return None
+        lx, lz = cell.local(SIZE)
+        return city.at(lx, lz)
+
+    def world_cell(self, chunk: tuple[int, int], x: int, z: int) -> WorldCell:
+        return world_cell(chunk, x, z, SIZE)
+
+    def terraform(self, tool: str, cells: list[tuple[int, int]]) -> int:
+        """Apply one atomic terrain stroke across district boundaries."""
+        origin = self.focus
+        previous = self.city
+
+        def resolve(wx: int, wz: int):
+            key = district_at(wx, wz)
+            self._materialise(key, previous)
+            return key, self.cities[key].at(wx - key[0] * SIZE, wz - key[1] * SIZE)
+
+        selected = {(origin[0] * SIZE + x, origin[1] * SIZE + z) for x, z in cells}
+        changes: dict[tuple[int, int], int] = {}
+        queue = deque()
+        if tool in TERRAFORM:
+            delta = TERRAFORM[tool]
+            for point in selected:
+                _, tile = resolve(*point)
+                if tile.kind != "empty":
+                    raise ValueError("Bulldoze development before reshaping the terrain beneath it.")
+                target = tile.height + delta
+                if MIN_HEIGHT <= target <= MAX_HEIGHT:
+                    changes[point] = target
+                    queue.append(point)
+            while queue:
+                wx, wz = queue.popleft()
+                wanted = changes[(wx, wz)] - delta
+                for point in ((wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)):
+                    _, tile = resolve(*point)
+                    current = changes.get(point, tile.height)
+                    if (current < wanted) if delta > 0 else (current > wanted):
+                        if tile.kind != "empty":
+                            raise ValueError("That slope would disturb nearby development. Bulldoze it or reshape land farther away.")
+                        changes[point] = wanted
+                        queue.append(point)
+                        if len(changes) > MAX_TERRAFORM_TILES:
+                            raise ValueError("That terrain change is too large for one stroke.")
+        elif tool == "level":
+            _, first = resolve(*next(iter((origin[0] * SIZE + x, origin[1] * SIZE + z) for x, z in cells)))
+            target = first.height
+            for point in selected:
+                _, tile = resolve(*point)
+                if tile.kind != "empty":
+                    raise ValueError("Bulldoze development before levelling the terrain beneath it.")
+                if tile.height != target:
+                    changes[point] = target
+                queue.append(point)
+            while queue:
+                wx, wz = queue.popleft()
+                _, tile = resolve(wx, wz)
+                height = target if (wx, wz) in selected else changes.get((wx, wz), tile.height)
+                for point in ((wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)):
+                    _, neighbour = resolve(*point)
+                    current = target if point in selected else changes.get(point, neighbour.height)
+                    wanted = height - 1 if current < height - 1 else height + 1 if current > height + 1 else current
+                    if wanted == current:
+                        continue
+                    if point in selected:
+                        raise ValueError("The selected area cannot be levelled while preserving adjacent slopes.")
+                    if neighbour.kind != "empty":
+                        raise ValueError("That slope would disturb nearby development. Bulldoze it or level land farther away.")
+                    changes[point] = wanted
+                    queue.append(point)
+                    if len(changes) > MAX_TERRAFORM_TILES:
+                        raise ValueError("That terrain change is too large for one stroke.")
+        else:
+            raise ValueError("Unknown terrain tool.")
+
+        for (wx, wz), height in changes.items():
+            key, tile = resolve(wx, wz)
+            local_index = (wz - key[1] * SIZE) * SIZE + wx - key[0] * SIZE
+            if local_index in self.cities[key].pipes and height < 0:
+                raise ValueError("Remove underground pipes before submerging land.")
+        cost = len(changes) * COSTS[tool]
+        if cost > previous.money:
+            raise ValueError(f"Insufficient funds: this terrain change costs ${cost:,}.")
+        if not changes:
+            return 0
+        touched = set()
+        for (wx, wz), height in changes.items():
+            key, tile = resolve(wx, wz)
+            tile.height = height
+            touched.add(key)
+        previous.money -= cost
+        for key in touched:
+            self.cities[key]._changed(terrain=True)
+        self.modified.update(touched)
+        self.mesh_cache.clear()
+        return cost
+
+    def terrain_edges(self, cx: int, cz: int) -> tuple[tuple[float, ...], ...]:
+        """Shared half-cell vertices derived from current terrain on both sides."""
+        generated: dict[tuple[int, int], tuple[int, ...]] = {}
+
+        def height(wx: int, wz: int) -> int:
+            key = district_at(wx, wz)
+            local_x, local_z = wx - key[0] * SIZE, wz - key[1] * SIZE
+            city = self.cities.get(key)
+            if city is not None:
+                return city.at(local_x, local_z).height
+            values = generated.setdefault(key, terrain(self.seed, *key, self.base, self.generator))
+            return values[local_z * SIZE + local_x]
+
+        def vertex(x: float, z: float) -> float:
+            xs = {math.floor(x - .5), math.floor(x)}
+            zs = {math.floor(z - .5), math.floor(z)}
+            return sum(height(ix, iz) for iz in zs for ix in xs) / (len(xs) * len(zs))
+
+        ox, oz = cx * SIZE, cz * SIZE
+        samples = range(2 * SIZE + 1)
+        return tuple(tuple(vertex(ox + (i / 2 if side in (0, 2) else (SIZE if side == 1 else 0)),
+                                  oz + (i / 2 if side in (1, 3) else (SIZE if side == 2 else 0)))
+                           for i in samples) for side in range(4))
+
+    def chunks_in(self, bounds: Bounds):
+        """Loaded chunks intersecting a world-space bounding box."""
+        for chunk in bounds.chunks(SIZE):
+            city = self.cities.get((chunk.x, chunk.z))
+            if city is not None:
+                yield chunk, city
+
+    def road_neighbours(self, cell: WorldCell) -> tuple[WorldCell, ...]:
+        """Road adjacency in world space, including across chunk edges."""
+        if (tile := self.tile_at(cell.x, cell.z)) is None or tile.kind != "road":
+            return ()
+        return tuple(n for n in cell.neighbours()
+                     if (tile := self.tile_at(n.x, n.z)) is not None and tile.kind == "road")
+
+    def road_component(self, start: WorldCell) -> set[WorldCell]:
+        """Return the continuous loaded road component containing ``start``."""
+        if not self.road_neighbours(start) and (
+                (tile := self.tile_at(start.x, start.z)) is None or tile.kind != "road"):
+            return set()
+        found, pending = {start}, [start]
+        while pending:
+            for neighbour in self.road_neighbours(pending.pop()):
+                if neighbour not in found:
+                    found.add(neighbour)
+                    pending.append(neighbour)
+        return found
+
+    def _regional_workforce(self):
+        """Allocate workers over continuous road components in the active world.
+
+        Cars remain a presentation detail of the focused chunk, but employment
+        and trip distance no longer stop at a chunk boundary.
+        """
+        active = tuple(sorted(key for key in self.high if key in self.cities))
+        signature = tuple((key, self.cities[key].revision) for key in active)
+        if signature == self._workforce_signature:
+            return
+        self._workforce_signature = signature
+
+        roads: set[WorldCell] = set()
+        for key in active:
+            city = self.cities[key]
+            roads.update(self.world_cell(key, tile.x, tile.z) for tile in city.tiles if tile.kind == "road")
+        component: dict[WorldCell, int] = {}
+        for start in sorted(roads):
+            if start in component:
+                continue
+            label = len(component)
+            pending, component[start] = [start], label
+            while pending:
+                cell = pending.pop()
+                for neighbour in cell.neighbours():
+                    if neighbour in roads and neighbour not in component:
+                        component[neighbour] = label
+                        pending.append(neighbour)
+
+        markets: dict[int, dict[str, list[tuple[tuple[int, int], object, WorldCell]]]] = {}
+        for key in active:
+            city = self.cities[key]
+            for tile in city.tiles:
+                if tile.kind not in ZONES or not tile.powered:
+                    continue
+                cell = self.world_cell(key, tile.x, tile.z)
+                labels = [component[n] for n in cell.neighbours() if n in component]
+                if not labels:
+                    continue
+                tile.road_access = tile.connected = True
+                market = markets.setdefault(min(labels), {"homes": [], "jobs": []})
+                market["homes" if tile.kind == "residential" else "jobs"].append((key, tile, cell))
+
+        # Clear business staffing before allocating connected world markets.
+        for key in active:
+            for tile in self.cities[key].tiles:
+                if tile.kind in BUSINESSES:
+                    tile.workers = 0
+
+        total = cross = weighted_distance = 0
+        for market in markets.values():
+            homes = [[key, tile, cell, tile.labor] for key, tile, cell in market["homes"] if tile.labor]
+            jobs = [[key, tile, cell, tile.job_capacity] for key, tile, cell in market["jobs"] if tile.job_capacity]
+            # Nearest-first matching is deterministic and naturally prefers a
+            # local job without forbidding a commute over a chunk edge.
+            pairs = sorted(((abs(h[2].x - j[2].x) + abs(h[2].z - j[2].z), hi, ji)
+                            for hi, h in enumerate(homes) for ji, j in enumerate(jobs)),
+                           key=lambda item: (item[0], item[1], item[2]))
+            for distance, hi, ji in pairs:
+                count = min(homes[hi][3], jobs[ji][3])
+                if not count:
+                    continue
+                homes[hi][3] -= count
+                jobs[ji][3] -= count
+                jobs[ji][1].workers += count
+                total += count
+                weighted_distance += distance * count
+                if homes[hi][0] != jobs[ji][0]:
+                    cross += count
+
+        for key in active:
+            city = self.cities[key]
+            city.workforce = sum(t.labor for t in city.tiles if t.kind == "residential" and t.road_access and t.powered)
+            city.employed = sum(t.workers for t in city.tiles if t.kind in BUSINESSES)
+            city.jobs = sum(t.job_capacity for t in city.tiles if t.kind in BUSINESSES and t.road_access and t.powered)
+            city.income = city.population * 2 + sum(t.workers * t.condition // 100 for t in city.tiles if t.kind in BUSINESSES)
+            if city._traffic is not None:
+                city._traffic_stale = city._traffic
+            city._traffic = None
+            city._snapshot = None
+        self.mobility = {"commuters": total, "crossBoundary": cross,
+                         "averageWorldDistance": round(weighted_distance / total, 1) if total else 0.0}
+
+    def _materialise(self, key: tuple[int, int], previous: City):
+        """Create a live district aligned to the region clock, if necessary."""
+        if key in self.cities:
+            return
+        city = City(self.seed, heights=terrain(self.seed, *key, self.base, self.generator), starter=False)
+        city.terrain_generator = self.generator
+        city.tick, city.clock = previous.tick, previous.clock
+        city.power_clock, city._power_accumulator = previous.power_clock, previous._power_accumulator
+        city._fast_seconds, city.speed = previous._fast_seconds, previous.speed
+        city.history = []
+        city.power_history = []
+        city.record_history()
+        city.record_power()
+        self.cities[key] = city
+
     def flush(self, key):
         seconds = self.pending.pop(key, 0.)
         if seconds:
@@ -178,22 +438,13 @@ class Region:
     def select(self, x: float, z: float):
         key = district_at(x, z)
         self.high = detailed_districts(x, z)
+        previous = self.city
+        # The active simulation is always a 3 x 3 window centred on the camera.
+        for active in sorted(self.high):
+            self._materialise(active, previous)
         if key == self.focus:
             return
-        previous = self.city
         self.flush(self.focus)
-        if key not in self.cities:
-            city = City(self.seed, heights=terrain(self.seed, *key, self.base, self.generator), starter=False)
-            city.terrain_generator = self.generator
-            # New districts share the region's time and simulation speed.
-            city.tick, city.clock = previous.tick, previous.clock
-            city.power_clock, city._power_accumulator = previous.power_clock, previous._power_accumulator
-            city._fast_seconds, city.speed = previous._fast_seconds, previous.speed
-            city.history = []
-            city.power_history = []
-            city.record_history()
-            city.record_power()
-            self.cities[key] = city
         self.flush(key)
         self.focus = key
         self.explored.add(key)
@@ -222,6 +473,7 @@ class Region:
                 if self.pending[key] >= 2:
                     jobs.append((key, self.pending.pop(key), 30))
         self._run_jobs(jobs)
+        self._regional_workforce()
 
     def set_speed(self, speed):
         for key, city in self.cities.items():
@@ -248,29 +500,45 @@ class Region:
                           [(0, i / 2) for i in range(SIZE * 2 + 1)])],
                       buildings=[[t.x, t.z, t.height, t.kind, t.level] for t in city.tiles
                                  if t.level or t.kind in ("power", "park", "road", "waterworks", "service")] if city else [])
-        if self.generator in PERLIN_GENERATORS:
-            result["edges"] = world_edges(self.seed, cx, cz, self.generator)
+        result["edges"] = self.terrain_edges(cx, cz)
         self.mesh_cache[key] = result
-        if len(self.mesh_cache) > 80:
+        if len(self.mesh_cache) > 256:
             del self.mesh_cache[next(iter(self.mesh_cache))]
         return result
 
-    def view(self, x: float, z: float, distance: float):
+    def view(self, x: float, z: float, distance: float, terrain_shell: int = 0):
         cx, cz = self.focus
         self.visual_high = visible_detail(x, z, distance, self.visual_high)
-        self.high = self.visual_high | {self.focus}
-        radius = min(3, max(1, math.ceil(distance / SIZE)))
+        # Simulation fidelity follows the camera tile, not render LOD: all nine
+        # districts in the active window keep running even when zoomed out.
+        self.high = detailed_districts(x, z)
+        base_radius = min(3, max(1, math.ceil(distance / SIZE)))
+        terrain_shell = min(3, max(0, terrain_shell))
+        radius = base_radius + terrain_shell
         tiles = []
         for dz in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
                 ring = max(abs(dx), abs(dz))
-                step = 4 if distance < 300 and ring <= 1 else 16 if ring <= 2 else 32
+                # Every step must divide SIZE: the renderer builds complete cells
+                # from this grid. The first terrain-only shell stays fine while
+                # the detailed renderer is active, avoiding a visible cliff from
+                # one-cell terrain to giant triangles at the district boundary.
+                if distance < 300 and ring <= 2:
+                    step = 4
+                elif ring <= base_radius + 1:
+                    step = 10
+                elif ring <= base_radius + 2:
+                    step = 20
+                else:
+                    step = 25
                 key = (cx + dx, cz + dz)
                 mesh = self.mesh(*key, step)
-                if key in self.visual_high:
+                if ring > base_radius:
+                    mesh = {**mesh, "buildings": []}
+                if key in self.high:
                     city = self.cities.get(key)
                     lots = [[t.x, t.z, t.kind, t.variant, t.level, t.condition, t.workers,
-                             t.powered, t.connected, t.residents]
+                             t.powered, t.connected, t.residents, t.installation_part]
                             for t in city.tiles if t.kind != "empty"] if city else []
                     # Rendering data does not allocate simulations for pristine neighbours.
                     detail = dict(seed=self.seed, desirability=city.desirability() if city else None, water=city.water_network.data() if city else None,
@@ -286,9 +554,16 @@ class Region:
                 else:
                     tiles.append(mesh)
         self.explored.update((t["x"], t["z"]) for t in tiles)
+        active = detailed_districts(x, z)
+        min_cx, max_cx = min(k[0] for k in active), max(k[0] for k in active)
+        min_cz, max_cz = min(k[1] for k in active), max(k[1] for k in active)
         return dict(size=SIZE, focus=list(self.focus), detailed=[list(k) for k in sorted(self.high)],
+                    coordinateSystem="world", activeBounds=[min_cx * SIZE, min_cz * SIZE,
+                                                              (max_cx + 1) * SIZE, (max_cz + 1) * SIZE],
+                    mobility=self.mobility,
                     activity=self.activity_counts(), workers=self.workers,
                     explored=len(self.explored), inhabited=len(self.modified), tiles=tiles,
+                    terrainShell=terrain_shell,
                     fogNear=max(180, distance * .85), fogFar=min(1400, max(360, distance + radius * SIZE * .8)))
 
     def save_data(self):
@@ -346,3 +621,8 @@ class Region:
             raise ValueError("Invalid explored districts.")
         region.explored = {coord(k) for k in explored} | set(cities)
         return region
+
+
+# Compatibility name for saves, tests and external code during the migration.
+# A Region is now explicitly a continuous World whose City instances are chunks.
+Region = World

@@ -1,0 +1,19 @@
+{
+    "id":  "commercial.entertainment",
+    "kind":  "commercial",
+    "variant":  "e",
+    "label":  "Entertainment",
+    "constructionCost":  10,
+    "maxLevel":  4,
+    "jobsPerLevel":  10,
+    "power":  {
+                  "peakKwPerLevel":  20,
+                  "profile":  "entertainment"
+              },
+    "desirability":  {
+                         "profile":  "commercial",
+                         "parkWeight":  3,
+                         "parkCap":  12,
+                         "industryPenalty":  5
+                     }
+}

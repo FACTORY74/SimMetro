@@ -1,0 +1,19 @@
+{
+    "id":  "industrial.farming",
+    "kind":  "industrial",
+    "variant":  "f",
+    "label":  "Farming",
+    "constructionCost":  10,
+    "maxLevel":  3,
+    "jobsPerLevel":  6,
+    "power":  {
+                  "peakKwPerLevel":  5,
+                  "profile":  "industrial"
+              },
+    "desirability":  {
+                         "profile":  "farming",
+                         "parkWeight":  0,
+                         "parkCap":  0,
+                         "industryPenalty":  10
+                     }
+}

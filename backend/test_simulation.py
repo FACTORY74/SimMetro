@@ -275,6 +275,17 @@ class SaveTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def test_new_city_uses_a_fresh_seed_and_session(self):
+        original = City(42)
+        with patch.object(app_module, "city", original), \
+             patch.object(app_module, "region", Region(original)), \
+             patch.object(app_module, "SESSION", "old-session"), \
+             patch.object(app_module.secrets, "randbelow", return_value=123456):
+            state = TestClient(app_module.app).post("/api/new", json={}).json()
+            self.assertEqual(state["seed"], 123456)
+            self.assertNotEqual(state["session"], "old-session")
+            self.assertEqual(app_module.region.seed, 123456)
+
     def test_state_is_compact_and_supports_since(self):
         client = TestClient(app_module.app)
         state = client.get("/api/state").json()

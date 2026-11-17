@@ -1,0 +1,22 @@
+{
+    "id":  "power.nuclear",
+    "kind":  "power",
+    "variant":  "n",
+    "label":  "Nuclear power station",
+    "constructionCost":  4000,
+    "powerPlant":  {
+                       "capacityKw":  4000,
+                       "upkeep":  450,
+                       "storageKwh":  0
+                   },
+    "installation":  {
+                         "width":  4,
+                         "depth":  4,
+                         "layout":  "nuclear_complex"
+                     },
+    "landDesirability":  {
+                             "points":  -80,
+                             "radius":  20,
+                             "label":  "Nuclear power station"
+                         }
+}

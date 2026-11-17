@@ -1,0 +1,22 @@
+{
+    "id":  "power.coal",
+    "kind":  "power",
+    "variant":  "c",
+    "label":  "Coal power station",
+    "constructionCost":  900,
+    "powerPlant":  {
+                       "capacityKw":  800,
+                       "upkeep":  180,
+                       "storageKwh":  0
+                   },
+    "installation":  {
+                          "width":  2,
+                          "depth":  2,
+                          "layout":  "scaled_single"
+                      },
+    "landDesirability":  {
+                             "points":  -30,
+                             "radius":  12,
+                             "label":  "Coal power station"
+                         }
+}

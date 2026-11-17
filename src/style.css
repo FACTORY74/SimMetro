@@ -54,3 +54,6 @@
 .desirability-factor>div { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
 .desirability-factor small { display: block; margin-top: 3px; color: #a6b9ad; font-size: 10px; line-height: 1.4; }
 @media(max-width:760px){.desirability-panel .budget-row{display:flex;font-size:9px}}
+/* Optional world-space outlines for the streamed simulation districts. */
+.layer-toggle { display: flex; align-items: center; gap: .45rem; margin-top: .65rem; font-size: .78rem; }
+.layer-toggle input { accent-color: #d6b85b; }

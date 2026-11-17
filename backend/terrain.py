@@ -6,7 +6,7 @@ into different rectangles produces exactly the same height samples.
 from functools import lru_cache
 import numpy as np
 
-SIZE = 256
+SIZE = 100
 MIN_HEIGHT, MAX_HEIGHT = -32, 96
 GENERATOR_VERSION = 5
 PERLIN_GENERATORS = (2, 3, 4, GENERATOR_VERSION)

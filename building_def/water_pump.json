@@ -1,0 +1,15 @@
+{
+    "id":  "water.pump",
+    "kind":  "waterworks",
+    "variant":  "p",
+    "label":  "Groundwater pumping station",
+    "constructionCost":  1000,
+    "facility":  {
+                     "width":  2,
+                     "depth":  1,
+                     "upkeep":  60,
+                     "powerKw":  12,
+                     "productionPerDay":  1200,
+                     "storage":  0
+                 }
+}

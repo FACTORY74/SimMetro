@@ -1,0 +1,17 @@
+{
+    "id":  "service.fire",
+    "kind":  "service",
+    "variant":  "f",
+    "label":  "Fire station",
+    "constructionCost":  800,
+    "service":  {
+                    "upkeep":  80,
+                    "powerKw":  10,
+                    "radius":  12,
+                    "desirabilityPoints":  {
+                                               "residential":  5,
+                                               "commercial":  6,
+                                               "industrial":  8
+                                           }
+                }
+}

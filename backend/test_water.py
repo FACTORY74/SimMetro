@@ -8,7 +8,7 @@ from backend.facilities import FACILITIES, Facility
 def water_city():
     city = City(heights=(1,) * TILE_COUNT, starter=False)
     city.build("road", [(x, 10) for x in range(10, 26)])
-    city.build("power", [(10, 9)], "c")
+    city.build("power", [(10, 8)], "c")
     city.build("waterworks", [(11, 11)], "p", rotation=1)
     city.build("waterworks", [(21, 11)], "t", rotation=1)
     city.build("residential", [(13, 9), (23, 9)], "l")
@@ -29,7 +29,7 @@ class WaterTests(unittest.TestCase):
         city = water_city()
         tower = next(f for f in city.facilities.values() if f.variant == "t")
         self.assertEqual(len(tower.footprint()), 4)
-        self.assertEqual(sum(t.facility_root for t in city.tiles), 2)
+        self.assertEqual(sum(t.facility_root for t in city.tiles if t.kind == "waterworks"), 2)
         self.assertAlmostEqual(sum(city.grid.loads[z*SIZE+x] for x, z in tower.footprint()), 2)
         self.assertEqual(city.expenses, 16*2 + 180 + 60 + 15)
 

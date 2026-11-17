@@ -1,0 +1,20 @@
+{
+    "id":  "residential.high",
+    "kind":  "residential",
+    "variant":  "h",
+    "label":  "High density residential",
+    "constructionCost":  8,
+    "maxLevel":  4,
+    "residentsPerLevel":  24,
+    "jobsPerLevel":  0,
+    "power":  {
+                  "peakKwPerLevel":  6,
+                  "profile":  "residential"
+              },
+    "desirability":  {
+                         "profile":  "residential",
+                         "parkWeight":  5,
+                         "parkCap":  20,
+                         "industryPenalty":  10
+                     }
+}

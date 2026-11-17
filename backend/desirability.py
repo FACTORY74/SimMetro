@@ -5,6 +5,7 @@ change smoothed scores or decline counters; inspection is a pure calculation.
 """
 import math
 from backend.services import SERVICES
+from backend.catalogue import definition, definitions
 
 VERSION = 1
 ZONES = {"residential", "commercial", "industrial"}
@@ -12,13 +13,10 @@ GROWTH_SCORE = 50
 DECLINE_SCORE = 40
 RECOVERY_SCORE = 45
 SMOOTHING = .35
-PROFILES = {
-    "residential": (5, 20, 10),
-    "commercial": (3, 12, 5),
-    "manufacturing": (0, 0, 0),
-    "high_tech": (3, 12, 10),
-    "farming": (0, 0, 10),
-}
+PROFILES = {row["desirability"]["profile"]: (row["desirability"]["parkWeight"],
+                                             row["desirability"]["parkCap"],
+                                             row["desirability"]["industryPenalty"])
+            for (kind, _), row in definitions().items() if kind in ZONES}
 
 
 def sample_services(city, minutes):
@@ -74,6 +72,16 @@ def evaluate(city, plan=None, *, monthly=False):
                 parks_near.setdefault(pz * size + px, []).append(i)
     operating_services = [(t.x, t.z, t.subtype, SERVICES[t.subtype]) for t in city.tiles
                           if t.kind == "service" and t.powered and t.road_access]
+    land_impacts = []
+    for source in city.tiles:
+        if source.kind != "power":
+            continue
+        impact = definition("power", source.subtype).get("landDesirability")
+        if not impact or source.installation_part > 0:
+            continue
+        installation = definition("power", source.subtype).get("installation")
+        offset = (installation["width"] - 1) / 2 if installation and source.installation_part >= 0 else 0
+        land_impacts.append((source.x + offset, source.z + offset, impact))
     jobs, labor, vacant = {}, {}, {}
     district_of = {}
     for i, tile in enumerate(city.tiles):
@@ -100,7 +108,7 @@ def evaluate(city, plan=None, *, monthly=False):
     rows = {}
     for i, district in district_of.items():
         tile = city.tiles[i]
-        profile = tile.kind if tile.kind != "industrial" else {"m": "manufacturing", "t": "high_tech", "f": "farming"}[tile.subtype]
+        profile = definition(tile.kind, tile.subtype)["desirability"]["profile"]
         park_weight, park_cap, industry_weight = PROFILES[profile]
         x0, z0 = max(0, tile.x - 2), max(0, tile.z - 2)
         x1, z1 = min(size, tile.x + 3), min(size, tile.z + 3)
@@ -142,6 +150,13 @@ def evaluate(city, plan=None, *, monthly=False):
             dict(label="Water reliability", points=0. if city.water_grace else round(-25*(1-water), 2),
                  detail=f"{water:.0%} served during last monthly sample" + (f"; {city.water_grace}-month migration grace" if city.water_grace else "")),
         ]
+        for ix, iz, impact in land_impacts:
+            distance = math.hypot(tile.x - ix, tile.z - iz)
+            affected = distance <= impact.get("radius", 0)
+            components.append(dict(label=impact.get("label", "Land-use impact"),
+                points=float(impact.get("points", 0) if affected else 0),
+                detail=(f"Within {impact['radius']}-tile impact radius; source {distance:.1f} tiles away"
+                        if affected else f"Outside {impact.get('radius', 0)}-tile impact radius")))
         for variant, service in SERVICES.items():
             distances = [math.hypot(tile.x-sx, tile.z-sz) for sx, sz, kind, _ in operating_services if kind == variant]
             nearest = min(distances) if distances else None

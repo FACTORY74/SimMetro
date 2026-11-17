@@ -14,12 +14,13 @@ from backend.services import SERVICES
 from backend.traffic import ROAD_CAPACITY, TrafficPlan, plan_traffic
 from backend.power import LINE_SPAN, PLANTS, STEP_MINUTES, PowerGrid
 from backend.terrain import SIZE, MIN_HEIGHT, MAX_HEIGHT, GENERATOR_VERSION, PERLIN_GENERATORS, world_heights
+from backend.catalogue import definitions
 
 
 TILE_COUNT = SIZE * SIZE
-ORIGIN = 80  # Offset of the original starter-town layout within the larger map.
+ORIGIN = 20  # Offset of the starter-town layout within a district.
 MAX_TERRAFORM_TILES = 4000
-SAVE_VERSION = 9
+SAVE_VERSION = 11
 CODES = {"empty": ".", "road": "=", "residential": "r", "commercial": "c",
          "industrial": "i", "power": "p", "park": "k", "powerline": "l", "waterworks": "w", "service": "s"}
 # Subtypes, one character each; the first listed is the default.
@@ -33,12 +34,17 @@ VARIANTS = {
     "service": "fpe",       # fire, police, education
 }
 # Highest development level and jobs per level, keyed by kind initial + variant.
-MAX_LEVEL = {"rh": 4, "rm": 3, "rl": 2, "cr": 3, "co": 4, "ce": 4, "im": 4, "it": 4, "if": 3}
-JOBS_PER_LEVEL = {"cr": 12, "co": 16, "ce": 10, "im": 20, "it": 14, "if": 6}
+_BUILDINGS = definitions()
+MAX_LEVEL = {kind[0] + variant: row["maxLevel"] for (kind, variant), row in _BUILDINGS.items()
+             if kind in {"residential", "commercial", "industrial"}}
+JOBS_PER_LEVEL = {kind[0] + variant: row["jobsPerLevel"] for (kind, variant), row in _BUILDINGS.items()
+                  if kind in {"commercial", "industrial"}}
 KIND_BY_CODE = {code: kind for kind, code in CODES.items()}
 KINDS = set(CODES)
-COSTS = {"road": 12, "residential": 8, "commercial": 10, "industrial": 10,
-         "power": 900, "park": 60, "powerline": 15, "service": 800, "bulldoze": 5, "raise": 20, "lower": 20, "waterworks": 1000, "pipe": 3, "remove_pipe": 1}
+COSTS = {"road": 12,
+         **{kind: next(row["constructionCost"] for (row_kind, _), row in _BUILDINGS.items() if row_kind == kind)
+            for kind in ("residential", "commercial", "industrial")},
+         "power": 900, "park": 60, "powerline": 15, "service": 800, "bulldoze": 5, "raise": 20, "lower": 20, "level": 20, "waterworks": 1000, "pipe": 3, "remove_pipe": 1}
 TERRAFORM = {"raise": 1, "lower": -1}
 ZONES = {"residential", "commercial", "industrial"}
 BUSINESSES = {"commercial", "industrial"}
@@ -73,6 +79,7 @@ class Tile:
     variant: str = ""
     facility_id: int = 0
     facility_root: bool = False
+    installation_part: int = -1
 
     @property
     def subtype(self) -> str:
@@ -86,6 +93,10 @@ class Tile:
     @property
     def max_level(self) -> int:
         return MAX_LEVEL.get(self.kind[0] + self.subtype, 0) if self.kind in ZONES else 0
+
+    @property
+    def residents_per_level(self) -> int:
+        return _BUILDINGS.get((self.kind, self.subtype), {}).get("residentsPerLevel", 0)
 
     @property
     def job_capacity(self) -> int:
@@ -185,11 +196,13 @@ def generate_heights(seed: int) -> tuple[int, ...]:
 
 
 def expand_legacy_map(data: dict) -> dict:
-    """Centre the old 200-cell city inside a 256-cell district without losing lots.
+    """Reject legacy 200-cell maps which cannot fit in a 100-cell district.
 
     Extend edge terrain and regional roads through the added border. All validation
     still runs on the expanded data before the live city can be replaced.
     """
+    if SIZE < 200:
+        raise ValueError("Legacy 200 x 200 saves cannot be loaded into 100 x 100 districts.")
     old, offset = 200, (SIZE - 200) // 2
     result = dict(data)
     columns = {"heights": list, "kinds": str, "levels": str}
@@ -236,7 +249,7 @@ def _starter_layout():
     for z in range(9, 31):
         for x in (16, 24):
             yield x, z, "road", "", 0
-    yield 29, 19, "power", "c", 0
+    yield 29, 18, "power", "c", 0
     for x, zs, kind, variant in [
         (15, range(11, 20), "residential", "h"),
         (17, range(12, 20), "residential", "m"),
@@ -315,7 +328,14 @@ class City:
         for x, z, kind, variant, level in STARTER_LAYOUT:
             tile = self.at(ox + x, oz + z)
             tile.kind, tile.variant, tile.level = kind, variant, level
-            tile.occupants = level * 24 if kind == "residential" else 0
+            tile.occupants = level * tile.residents_per_level if kind == "residential" else 0
+            installation = _BUILDINGS.get((kind, variant), {}).get("installation")
+            if installation:
+                for part, (dx, dz) in enumerate((dx, dz) for dz in range(installation["depth"])
+                                                for dx in range(installation["width"])):
+                    member = self.at(ox + x + dx, oz + z + dz)
+                    member.kind, member.variant, member.installation_part = kind, variant, part
+                    member.facility_root = part == 0
 
     def at(self, x: int, z: int) -> Tile:
         return self.tiles[z * SIZE + x]
@@ -339,6 +359,17 @@ class City:
         for i, tile in enumerate(tiles):
             tile.road_access = road[i] or any(road[j] for j in ADJ[i])
             tile.connected = tile.road_access
+        # A multi-tile installation is road-served when any footprint tile has
+        # frontage; the generating root need not be the tile beside the road.
+        for root in (t for t in tiles if t.kind == "power" and t.installation_part == 0):
+            spec = _BUILDINGS.get(("power", root.subtype), {}).get("installation")
+            if not spec:
+                continue
+            footprint = [self.at(root.x + dx, root.z + dz)
+                         for dz in range(spec["depth"]) for dx in range(spec["width"])]
+            served = any(t.road_access for t in footprint)
+            for tile in footprint:
+                tile.road_access = tile.connected = served
         if refresh_power:
             self.grid = PowerGrid(tiles, ADJ, SIZE, self.seed, self.battery_storage)
             self.grid.dispatch(self.power_clock)
@@ -385,7 +416,8 @@ class City:
         self.employed = sum(t.workers for t in active)
         self.income = self.population * 2 + sum(
             t.workers * t.condition // 100 for t in active if t.kind in BUSINESSES)
-        self.expenses = sum(road_type(t).upkeep for t in tiles if t.kind == "road") + sum(PLANTS[t.subtype].upkeep for t in tiles if t.kind == "power") + sum(
+        self.expenses = sum(road_type(t).upkeep for t in tiles if t.kind == "road") + sum(
+            PLANTS[t.subtype].upkeep for t in tiles if t.kind == "power" and t.installation_part <= 0) + sum(
             8 if t.kind == "park" else 1 if t.kind == "powerline" else 0 for t in tiles)
         self.expenses += sum(SERVICES[t.subtype].upkeep for t in tiles if t.kind == "service")
         self.expenses += sum(FACILITIES[f.variant].upkeep for f in self.facilities.values())
@@ -419,7 +451,46 @@ class City:
                 raise ValueError("Construction is outside the city boundary.")
         if tool in ("waterworks", "pipe", "remove_pipe"):
             return build_water(self, tool, unique, variant, rotation, SIZE)
+        installation = _BUILDINGS.get((tool, variant), {}).get("installation")
+        if tool == "power" and installation:
+            if len(unique) != 1:
+                raise ValueError(f"Place one {_BUILDINGS[tool, variant]['label'].lower()} at a time.")
+            x, z = unique[0]
+            footprint = [(x + dx, z + dz) for dz in range(installation["depth"]) for dx in range(installation["width"])]
+            if any(not (0 <= px < SIZE and 0 <= pz < SIZE) for px, pz in footprint):
+                raise ValueError(f"The {installation['width']} x {installation['depth']} installation is outside the city boundary.")
+            if any(self.at(px, pz).kind != "empty" or self.at(px, pz).water for px, pz in footprint):
+                raise ValueError(f"The installation requires a clear, dry {installation['width']} x {installation['depth']} site.")
+            cost = _BUILDINGS[tool, variant]["constructionCost"]
+            if cost > self.money:
+                raise ValueError(f"Insufficient funds: this installation costs ${cost:,}.")
+            for part, (px, pz) in enumerate(footprint):
+                tile = self.at(px, pz)
+                tile.kind, tile.variant, tile.installation_part = "power", variant, part
+                tile.facility_root = part == 0
+            self.money -= cost
+            self._changed()
+            return cost
         if tool == "bulldoze":
+            roots = {(t.x - t.installation_part % _BUILDINGS["power", t.subtype]["installation"]["width"],
+                      t.z - t.installation_part // _BUILDINGS["power", t.subtype]["installation"]["width"], t.subtype)
+                     for x, z in unique for t in (self.at(x, z),)
+                     if t.kind == "power" and t.installation_part >= 0 and
+                     _BUILDINGS.get(("power", t.subtype), {}).get("installation")}
+            if roots:
+                points = {(rx + dx, rz + dz) for rx, rz, subtype_ in roots
+                          for dz in range(_BUILDINGS["power", subtype_]["installation"]["depth"])
+                          for dx in range(_BUILDINGS["power", subtype_]["installation"]["width"])}
+                cost = 5 * len(roots)
+                if cost > self.money:
+                    raise ValueError("Insufficient funds for demolition.")
+                for px, pz in points:
+                    t = self.at(px, pz)
+                    t.kind, t.variant, t.level, t.installation_part = "empty", "", 0, -1
+                    t.facility_root = False
+                self.money -= cost
+                self._changed()
+                return cost
             facility_ids = {self.at(x, z).facility_id for x, z in unique} - {0}
             # One demolition charge per facility, regardless of selected footprint cells.
             ordinary = [(x, z) for x, z in unique if not self.at(x, z).facility_id]
@@ -444,6 +515,8 @@ class City:
                 return cost
         if tool in TERRAFORM:
             return self._terraform(tool, unique, preserve_border=preserve_border)
+        if tool == "level":
+            return self._level(unique, preserve_border=preserve_border)
         targets = []
         for x, z in unique:
             tile = self.at(x, z)
@@ -526,6 +599,45 @@ class City:
         self._changed(terrain=True)
         return cost
 
+    def _level(self, cells: list[tuple[int, int]], *, preserve_border: bool = False):
+        """Flatten a stroke to its first cell and relax surrounding slopes."""
+        target = self.at(*cells[0]).height
+        selected = {z * SIZE + x for x, z in cells}
+        if any(self.tiles[i].kind != "empty" for i in selected):
+            raise ValueError("Bulldoze development before levelling the terrain beneath it.")
+        heights = {i: target for i in selected if self.tiles[i].height != target}
+        queue = deque(selected)
+        while queue:
+            i = queue.popleft()
+            height = target if i in selected else heights.get(i, self.tiles[i].height)
+            for j in ADJ[i]:
+                current = target if j in selected else heights.get(j, self.tiles[j].height)
+                wanted = height - 1 if current < height - 1 else height + 1 if current > height + 1 else current
+                if wanted == current:
+                    continue
+                if j in selected:
+                    raise ValueError("The selected area cannot be levelled while preserving adjacent slopes.")
+                if self.tiles[j].kind != "empty":
+                    raise ValueError("That slope would disturb nearby development. Bulldoze it or level land farther away.")
+                heights[j] = wanted
+                queue.append(j)
+                if len(heights) > MAX_TERRAFORM_TILES:
+                    raise ValueError("That terrain change is too large for one stroke.")
+        if preserve_border and any(i % SIZE in (0, SIZE - 1) or i // SIZE in (0, SIZE - 1) for i in heights):
+            raise ValueError("That slope would change a shared district border. Reshape land farther inside the district.")
+        if any(i in self.pipes and h < 0 for i, h in heights.items()):
+            raise ValueError("Remove underground pipes before submerging land.")
+        cost = len(heights) * COSTS["level"]
+        if cost > self.money:
+            raise ValueError(f"Insufficient funds: this terrain change costs ${cost:,}.")
+        if not heights:
+            return 0
+        for i, height in heights.items():
+            self.tiles[i].height = height
+        self.money -= cost
+        self._changed(terrain=True)
+        return cost
+
     def advance(self):
         self.tick += 1
         suitability = commit_desirability(self)
@@ -577,11 +689,11 @@ class City:
                 if district is not None:
                     self._labor_surplus[district] -= needed
         for tile in self.tiles:
-            if tile.kind != "residential" or not tile.powered or not tile.road_access or not self.water_network.supplied(tile.z * SIZE + tile.x) or tile.occupants >= tile.level * 24:
+            if tile.kind != "residential" or not tile.powered or not tile.road_access or not self.water_network.supplied(tile.z * SIZE + tile.x) or tile.occupants >= tile.level * tile.residents_per_level:
                 continue
             row = suitability[str(tile.z * SIZE + tile.x)]
             if row["eligible"]:
-                tile.occupants += min(tile.level * 24 - tile.occupants, 1 + int((row["score"] - 50) // 15))
+                tile.occupants += min(tile.level * tile.residents_per_level - tile.occupants, 1 + int((row["score"] - 50) // 15))
         self.water_grace = max(0, self.water_grace - 1)
         self.recalculate()
         self.money += self.income - self.expenses
@@ -751,6 +863,7 @@ class City:
                 "power_supply": [round(self.grid.outputs.get(i, 0), 3) for i in range(TILE_COUNT)],
                 "power_grid": [self.grid.grid_of.get(i, -1) for i in range(TILE_COUNT)],
                 "battery_charge": [round(self.battery_storage.get(i, 0), 3) for i in range(TILE_COUNT)],
+                "installation_part": [t.installation_part for t in tiles],
             },
         }
 
@@ -765,6 +878,8 @@ class City:
                 "levels": "".join(str(t.level) for t in self.tiles),
                 "residents": [t.residents for t in self.tiles],
                 "conditions": [t.condition for t in self.tiles],
+                "power_installations": [i for i, t in enumerate(self.tiles)
+                                        if t.kind == "power" and t.installation_part == 0],
                 "desirability": {"version": 1,
                                   "state": {str(i): r for i, r in self.desirability_state.items()},
                                   "samples": {str(i): r for i, r in self.desirability_samples.items()}},
@@ -782,8 +897,8 @@ class City:
             raise ValueError("Unsupported save format.")
         if data.get("version") == 1:
             raise ValueError("This save is from the earlier 40 × 40 map and is not compatible "
-                             "with the 256 x 256 district map.")
-        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, SAVE_VERSION):
+                             "with the 100 x 100 district map.")
+        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10, SAVE_VERSION):
             raise ValueError("Unsupported save format.")
         if isinstance(data.get("heights"), list) and len(data["heights"]) == 200 * 200:
             data = expand_legacy_map(data)
@@ -844,11 +959,38 @@ class City:
             tile.height, tile.kind, tile.level, tile.variant = heights[i], kind, level, variant
             if level > tile.max_level:
                 raise ValueError("Invalid saved development level for its subtype.")
-            count = residents[i] if residents is not None else level * 24 if kind == "residential" else 0
-            if type(count) is not int or count < 0 or count > (level * 24 if kind == "residential" else 0):
+            count = residents[i] if residents is not None else level * tile.residents_per_level if kind == "residential" else 0
+            if type(count) is not int or count < 0 or count > (level * tile.residents_per_level if kind == "residential" else 0):
                 raise ValueError("Invalid saved residents.")
             tile.occupants = count
             tile.condition = conditions[i]
+        roots = data.get("power_installations", [])
+        if not isinstance(roots, list) or any(type(i) is not int or not 0 <= i < TILE_COUNT for i in roots):
+            raise ValueError("Invalid power installations.")
+        occupied = set()
+        for root in roots:
+            rx, rz = root % SIZE, root // SIZE
+            root_tile = city.at(rx, rz)
+            spec = _BUILDINGS.get(("power", root_tile.subtype), {}).get("installation")
+            if not spec:
+                raise ValueError("Invalid power installation type.")
+            points = [(rx + dx, rz + dz) for dz in range(spec["depth"]) for dx in range(spec["width"])]
+            if any(px >= SIZE or pz >= SIZE or (px, pz) in occupied or
+                   city.at(px, pz).kind != "power" or city.at(px, pz).subtype != root_tile.subtype for px, pz in points):
+                raise ValueError("Invalid power installation footprint.")
+            for part, (px, pz) in enumerate(points):
+                occupied.add((px, pz))
+                city.at(px, pz).installation_part = part
+                city.at(px, pz).facility_root = part == 0
+        legacy_installations = [t for t in city.tiles if t.kind == "power" and
+                                _BUILDINGS.get(("power", t.subtype), {}).get("installation") and
+                                t.installation_part < 0]
+        if legacy_installations:
+            if data["version"] == SAVE_VERSION:
+                raise ValueError("Power tiles must belong to an installation.")
+            # Earlier single-tile stations remain valid compact legacy plants.
+            for tile in legacy_installations:
+                tile.facility_root = True
         restore_water(city, data, SIZE)
         restore_desirability(city, data)
         history = data.get("history")

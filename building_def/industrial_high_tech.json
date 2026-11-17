@@ -1,0 +1,19 @@
+{
+    "id":  "industrial.high_tech",
+    "kind":  "industrial",
+    "variant":  "t",
+    "label":  "High tech",
+    "constructionCost":  10,
+    "maxLevel":  4,
+    "jobsPerLevel":  14,
+    "power":  {
+                  "peakKwPerLevel":  20,
+                  "profile":  "industrial"
+              },
+    "desirability":  {
+                         "profile":  "high_tech",
+                         "parkWeight":  3,
+                         "parkCap":  12,
+                         "industryPenalty":  10
+                     }
+}

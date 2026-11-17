@@ -6,6 +6,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import secrets
 import threading
 import time
 from uuid import uuid4
@@ -21,15 +22,17 @@ from backend.saves import AUTOSAVE_NAMES, autosave, save_path, write_save
 from backend.autoplay import AutoPlayer
 from backend.controller import CommandQueue
 from backend.simulation import SIZE, City
-from backend.region import Region, district_at, terrain
-from backend.terrain import PERLIN_GENERATORS, world_edges
+from backend.region import World, district_at, terrain
+from backend.catalogue import public_catalogue
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SAVE_PATH = Path(os.environ.get("KSC_SAVE_DIR", str(ROOT / "saves"))) / "city.json"
 logger = logging.getLogger("simmetro")
-city = City()
-region = Region(city)
+# A fresh server session starts a genuinely new landscape. Saved regions retain
+# their recorded seed, while direct City(seed=...) construction stays deterministic.
+city = City(seed=secrets.randbelow(2**31))
+region = World(city)
 SESSION = uuid4().hex
 autoplayer = AutoPlayer()
 autoplay_district = None
@@ -71,7 +74,7 @@ async def sim_json(request: Request, fn, *args, **kwargs):
 
 def snapshot():
     return {**city.snapshot(), "session": SESSION, "district": list(region.focus),
-            "terrainEdges": world_edges(region.seed, *region.focus, region.generator) if region.generator in PERLIN_GENERATORS else None}
+            "terrainEdges": region.terrain_edges(*region.focus)}
 
 
 def execute_command(name, operation):
@@ -149,7 +152,7 @@ class Cell(BaseModel):
 class BuildRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tool: Literal["road", "residential", "commercial", "industrial", "power", "park", "powerline",
-                  "service", "bulldoze", "raise", "lower", "waterworks", "pipe", "remove_pipe"]
+                  "service", "bulldoze", "raise", "lower", "level", "waterworks", "pipe", "remove_pipe"]
     cells: list[Cell] = Field(min_length=1, max_length=400)
     variant: str | None = Field(default=None, max_length=1)
     rotation: int = Field(default=0, ge=0, le=3, strict=True)
@@ -172,15 +175,22 @@ async def state(request: Request, since: int | None = None, session: str | None 
     return await sim_json(request, _state, since, session)
 
 
+@app.get("/api/buildings")
+async def buildings(request: Request):
+    """Authoritative building catalogue used by simulation and UI clients."""
+    return await sim_json(request, public_catalogue)
+
+
 @app.get("/api/view")
 async def view(request: Request,
-               x: float = Query(128, ge=-1999000, le=1999000, allow_inf_nan=False),
-               z: float = Query(128, ge=-1999000, le=1999000, allow_inf_nan=False),
+               x: float = Query(50, ge=-1999000, le=1999000, allow_inf_nan=False),
+               z: float = Query(50, ge=-1999000, le=1999000, allow_inf_nan=False),
                distance: float = Query(75, ge=8, le=900, allow_inf_nan=False),
+               terrain_shell: int = Query(1, ge=0, le=3),
                since: int | None = None, session: str | None = None):
     current_region = region
     cx, cz = district_at(x, z)
-    radius = min(3, max(1, math.ceil(distance / SIZE)))
+    radius = min(3, max(1, math.ceil(distance / SIZE))) + terrain_shell
     def prepare():
         for dz in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
@@ -194,7 +204,7 @@ async def view(request: Request,
             raise HTTPException(409, "Region changed while loading terrain. Retrying.")
         region.select(x, z)
         city = region.city
-        view_data = region.view(x, z, distance)
+        view_data = region.view(x, z, distance, terrain_shell)
         view_data["performance"] = {
             "updatesPerSecond": round(performance_status["updatesPerSecond"], 1),
             "simulationMs": round(performance_status["simulationMs"], 1),
@@ -217,7 +227,9 @@ def _build(request: BuildRequest):
     if request.district is not None and request.district != region.focus:
         raise HTTPException(409, "The viewed district changed. Try the stroke again.")
     try:
-        cost = city.build(request.tool, [(c.x, c.z) for c in request.cells], request.variant, preserve_border=True, rotation=request.rotation)
+        cells = [(c.x, c.z) for c in request.cells]
+        cost = region.terraform(request.tool, cells) if request.tool in ("raise", "lower", "level") else \
+            city.build(request.tool, cells, request.variant, rotation=request.rotation)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if cost:
@@ -236,6 +248,19 @@ async def speed(request: Request, payload: SpeedRequest):
         region.set_speed(payload.speed)
         return snapshot()
     return await sim_json(request, execute_command, "speed", respond)
+
+
+@app.post("/api/new")
+async def new_city(request: Request):
+    def respond():
+        global city, region, SESSION, autoplayer, autoplay_district
+        city = City(seed=secrets.randbelow(2**31))
+        region = World(city)
+        SESSION = uuid4().hex
+        autoplayer = AutoPlayer()
+        autoplay_district = None
+        return snapshot()
+    return await sim_json(request, execute_command, "new", respond)
 
 
 class AutoplayRequest(BaseModel):

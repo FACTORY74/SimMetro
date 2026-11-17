@@ -12,6 +12,8 @@ PIPE_UPKEEP = 0  # Maintenance included in facility operating costs for this sli
 
 
 def demand(tile):
+    if tile.kind == "power" and tile.installation_part > 0:
+        return 0
     if tile.kind == "residential":
         return .5 + tile.residents * .15
     if tile.kind in ("commercial", "industrial"):
@@ -55,7 +57,9 @@ class WaterNetwork:
                         if candidate < nearest.get(j, (999, 999999999)):
                             nearest[j] = candidate
         self.coverage = {j: self.components[i] for j, (_, i) in nearest.items()}
-        self.consumers = [i for i, t in enumerate(city.tiles) if t.kind in ("residential", "commercial", "industrial", "power")]
+        self.consumers = [i for i, t in enumerate(city.tiles)
+                          if t.kind in ("residential", "commercial", "industrial", "power")
+                          and not (t.kind == "power" and t.installation_part > 0)]
         self.services = {}
         self.facility_status = {}
         self.summary = {}
@@ -121,8 +125,12 @@ class WaterNetwork:
             fraction = fractions.get(key, 0.)
             reason = "No pipe coverage" if key is None else "Supplied" if fraction >= .999999 else "Insufficient supply or stored water"
             self.services[i] = dict(requested=rate, served=rate * fraction, fraction=fraction, network=key, reason=reason)
-        self.summary = dict(demand=sum(rates.values()), production=produced, served=served,
-                            unserved=max(0., sum(rates.values())-served), charging=charging,
+        total_demand = sum(rates.values())
+        unserved = max(0., total_demand - served)
+        if unserved < 1e-9:
+            unserved = 0.
+        self.summary = dict(demand=total_demand, production=produced, served=served,
+                            unserved=unserved, charging=charging,
                             discharging=discharging, spilled=spilled,
                             storage=sum(f.stored for f in city.facilities.values()),
                             storageCapacity=sum(FACILITIES[f.variant].storage for f in city.facilities.values()),

@@ -11,7 +11,7 @@ export function updateCityCameraDepth(camera: PerspectiveCamera, target: Vector3
   camera.updateProjectionMatrix();
 }
 
-export function createCityCamera(size = 256) {
+export function createCityCamera(size = 100) {
   const camera = new PerspectiveCamera(40, 1, .1, 1500);
   const centre = size / 2;
   camera.position.set(centre + CAMERA_OFFSET.x, CAMERA_OFFSET.y, centre + CAMERA_OFFSET.z);

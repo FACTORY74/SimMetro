@@ -1,0 +1,19 @@
+{
+    "id":  "commercial.retail",
+    "kind":  "commercial",
+    "variant":  "r",
+    "label":  "Retail",
+    "constructionCost":  10,
+    "maxLevel":  3,
+    "jobsPerLevel":  12,
+    "power":  {
+                  "peakKwPerLevel":  12,
+                  "profile":  "retail"
+              },
+    "desirability":  {
+                         "profile":  "commercial",
+                         "parkWeight":  3,
+                         "parkCap":  12,
+                         "industryPenalty":  5
+                     }
+}
