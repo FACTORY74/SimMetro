@@ -6,6 +6,8 @@ import { attachDesirability, type DesirabilityData, attachWater, type WaterData,
 export interface DistrictDetail {
   seed: number; heights: number[]; terrainRevision: number; stamp: string;
   lots: [number, number, Kind, string, number, number, number, boolean, boolean, number, number?][];
+  pollution?: number[] | null;
+  trees?: number[] | null;
   desirability?: DesirabilityData;
   water?: WaterData;
   powerLines: [number, number][];
@@ -26,7 +28,7 @@ export function detailedCity(tile: RegionTile, focus: CityState): CityState {
   const tiles: Tile[] = data.heights.map((height, i) => ({
     x: i % focus.size, z: Math.floor(i / focus.size), height, water: height < 0,
     kind: "empty", variant: "", level: 0, condition: 100, workers: 0, residents: 0,
-    powered: false, connected: false, traffic: 0, powerDemand: 0, powerSupply: 0, installationPart: -1,
+    powered: false, connected: false, traffic: 0, pollution: data.pollution?.[i] ?? 0, trees: data.trees?.[i] ?? 0, powerDemand: 0, powerSupply: 0, installationPart: -1,
     powerGrid: null, batteryCharge: 0,
   }));
   for (const [x, z, kind, variant, level, condition, workers, powered, connected, residents, installationPart] of data.lots)

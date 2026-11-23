@@ -65,6 +65,41 @@ class TerrainTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_pollution_is_a_bounded_spatial_field_on_every_tile(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        source = city.at(40, 40)
+        source.kind, source.variant, source.level = "industrial", "m", 2
+        park, bare = city.at(20, 20), city.at(22, 20)
+        park.kind = "park"
+        city.recalculate()
+        city._advance_pollution(360)
+        city._advance_pollution(360)
+        self.assertEqual(len(city.snapshot()["tiles"]["pollution"]), TILE_COUNT)
+        self.assertGreater(source.pollution, city.at(41, 40).pollution)
+        self.assertGreater(city.at(41, 40).pollution, 0)
+        self.assertEqual(city.at(70, 70).pollution, 0)
+        self.assertTrue(all(0 <= tile.pollution <= 100 for tile in city.tiles))
+        park.pollution = bare.pollution = 50
+        city._advance_pollution(360)
+        self.assertEqual(park.trees, 5)
+        self.assertLess(park.pollution, bare.pollution)
+        restored = City.restore(city.save_data())
+        self.assertEqual([t.pollution for t in restored.tiles], [t.pollution for t in city.tiles])
+
+    def test_every_built_kind_emits_with_dirty_uses_ranked_highest(self):
+        def tile(kind, variant="", level=1):
+            t = City(heights=(1,) * TILE_COUNT, starter=False).at(10, 10)
+            t.kind, t.variant, t.level = kind, variant, level
+            return t
+        rates = {kind: City._emissions(tile(kind, variant)) for kind, variant in
+                 (("road", "r"), ("residential", "h"), ("commercial", "r"),
+                  ("industrial", "t"), ("power", "s"), ("park", ""),
+                  ("powerline", ""), ("waterworks", "p"), ("service", "f"))}
+        self.assertTrue(all(rate > 0 for rate in rates.values()))
+        self.assertGreater(City._emissions(tile("power", "c")), City._emissions(tile("industrial", "m")))
+        self.assertGreater(City._emissions(tile("industrial", "m")), City._emissions(tile("industrial", "t")))
+        self.assertGreater(City._emissions(tile("industrial", "t")), City._emissions(tile("residential", "h")))
+
     def test_public_service_costs_and_upkeep(self):
         city = City()
         cells = [(ORIGIN + 40 + i, ORIGIN + 8) for i in range(3)]

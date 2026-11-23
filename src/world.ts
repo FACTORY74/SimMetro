@@ -53,6 +53,9 @@ const SWAY_VERTEX = /* glsl */ `
 const trafficRamp: [number, THREE.Color][] = ([
   [0, "#4f6670"], [.05, "#57b46d"], [.6, "#e3c650"], [1, "#e0803f"], [1.5, "#c9372c"],
 ] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
+const pollutionRamp: [number, THREE.Color][] = ([
+  [0, "#67b96f"], [8, "#a9c95b"], [20, "#e2c84e"], [40, "#e58a3f"], [65, "#d54f3f"], [100, "#7d365c"],
+] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
 const MUTED = new THREE.Color("#9aa69f"), PALE = new THREE.Color("#d9ddd8");
 const WHITE = new THREE.Color("#ffffff"), LOT_TINT = new THREE.Color("#c9d6c2");
 const terrainStops: [number, THREE.Color][] = TERRAIN_COLORS.map(([h, c]) => [h, new THREE.Color(c)]);
@@ -182,6 +185,9 @@ export class CityWorld {
   private wheels: THREE.InstancedMesh;
   private lamps: THREE.InstancedMesh;
   private beams: THREE.InstancedMesh;
+  /** Aggregate traffic shown at calendar speeds; ordinary car geometry is never modified. */
+  private readonly fastTraffic: THREE.Mesh;
+  private fastTrafficKey = "";
   /** Coloured light thrown onto the pavement by venue frontages and low neon signs. */
   private spills: THREE.InstancedMesh;
   /** For each spill, the index of the window (in `windowSlots`) whose glow it carries. */
@@ -217,6 +223,9 @@ export class CityWorld {
     zoomPhase: number; near: number; far: number } | null = null;
   private clockAt = performance.now();
   private running = false;
+  private speed: Speed = 0;
+  /** Real seconds accumulated only while the simulation is running. */
+  private effectTime = 0;
   private reported = 0;
   private reportedFrames = 0;
   /** Called about twice a second with traffic on the road, the extrapolated clock and people per car. */
@@ -412,6 +421,15 @@ export class CityWorld {
     });
     this.materials.push(this.beamMaterial);
     this.beams = instanced(beam, 1, this.beamMaterial, false, false);
+    const fastTrafficMaterial = new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: .82, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.materials.push(fastTrafficMaterial);
+    this.fastTraffic = new THREE.Mesh(new THREE.BufferGeometry(), fastTrafficMaterial);
+    this.fastTraffic.visible = false;
+    this.fastTraffic.renderOrder = 2;
+    this.detail.add(this.fastTraffic);
     // A strip of light from a frontage (x = 0) out across the pavement, built along +x for a unit-wide source.
     // It barely widens, so neighbouring windows' strips sit side by side instead of piling up to white.
     const spill = new THREE.BufferGeometry();
@@ -524,6 +542,7 @@ export class CityWorld {
       this.buildTerrain(city);
     }
     this.buildMarkings(city);
+    this.buildFastTraffic(city);
     this.paintTerrain(city);
     this.buildDevelopment(city);
     this.refreshPreview();
@@ -541,6 +560,7 @@ export class CityWorld {
   }
   setTool(tool: Tool) {
     this.tool = tool;
+    this.selection.visible = tool === "inspect" && !!this.selectedCell && !this.showcase;
     this.anchor = null;
     this.stroke = [];
     this.refreshPreview();
@@ -619,8 +639,9 @@ export class CityWorld {
       this.paintTerrain(this.city);
       this.buildDevelopment(this.city);
     }
-    this.setBuildingsGhosted(overlay === "desirability");
-    this.regionRenderer.setBuildingsGhosted(overlay === "desirability");
+    const ghosted = overlay === "desirability" || overlay === "pollution";
+    this.setBuildingsGhosted(ghosted);
+    this.regionRenderer.setBuildingsGhosted(ghosted);
     for (const neighbour of this.neighbours.values()) neighbour.world.setOverlay(overlay);
   }
 
@@ -643,7 +664,9 @@ export class CityWorld {
     // Small drift is eased out so cars never jump backwards; month rollovers and loads snap.
     this.clockBase = Math.abs(drift) < 6 && this.running ? predicted + drift * .25 : clock;
     this.clockAt = performance.now();
+    this.speed = speed;
     this.running = speed !== 0;
+    this.fastTraffic.visible = speed === 1 || speed === 3;
   }
 
   setTraffic(traffic: TrafficData) {
@@ -711,6 +734,64 @@ export class CityWorld {
     this.paintTerrain(city);
   }
 
+  /** Build the fast-forward traffic diagram. Each ordinary road gets a raised
+   * cylindrical flow line; two-way corners use a true quadratic tube instead
+   * of bending or scaling a car mesh. */
+  private buildFastTraffic(city: CityState) {
+    const surface = this.surface;
+    if (!surface) return;
+    let digest = 0, roads = 0;
+    city.tiles.forEach((tile, index) => {
+      if (tile.kind !== "road") return;
+      roads++;
+      digest = (Math.imul(digest, 31) + index + Math.round(tile.traffic * 10)) | 0;
+    });
+    const key = `${this.terrainKey}:${roads}:${digest}`;
+    if (key === this.fastTrafficKey) return;
+    this.fastTrafficKey = key;
+    const size = city.size, parts: THREE.BufferGeometry[] = [];
+    const isRoad = (i: number) => city.tiles[i]?.kind === "road";
+    const directions = [[0, -.5], [.5, 0], [0, .5], [-.5, 0]] as const;
+    const point = (x: number, z: number) => new THREE.Vector3(x, 0, z);
+    const followSurface = (path: THREE.Curve<THREE.Vector3>) => new class extends THREE.Curve<THREE.Vector3> {
+      constructor() { super(); }
+      override getPoint(t: number, target = new THREE.Vector3()) {
+        path.getPoint(t, target);
+        target.y = surface.groundAt(target.x, target.z) + .085;
+        return target;
+      }
+    }();
+    city.tiles.forEach((tile, index) => {
+      if (tile.kind !== "road") return;
+      const sides = directions.map((_, side) => side).filter(side => roadSides(index, size, isRoad) & 1 << side);
+      if (!sides.length) return;
+      const centre = point(tile.x + .5, tile.z + .5);
+      const end = (side: number) => point(tile.x + .5 + directions[side]![0], tile.z + .5 + directions[side]![1]);
+      const curves: THREE.Curve<THREE.Vector3>[] = [];
+      if (sides.length === 2) {
+        const [a, b] = sides as [number, number];
+        curves.push(followSurface((a + 2) % 4 === b
+          ? new THREE.LineCurve3(end(a), end(b))
+          : new THREE.QuadraticBezierCurve3(end(a), centre, end(b))));
+      } else {
+        for (const side of sides) curves.push(followSurface(new THREE.LineCurve3(end(side), centre)));
+      }
+      const busy = tile.traffic / roadType(tile).capacity;
+      const colour = ramp(trafficRamp, Math.max(.05, busy), new THREE.Color());
+      for (const curve of curves) {
+        const geometry = new THREE.TubeGeometry(curve, 12, .045, 7, false);
+        const colors = new Float32Array(geometry.getAttribute("position").count * 3);
+        for (let i = 0; i < colors.length; i += 3) colour.toArray(colors, i);
+        geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        parts.push(geometry);
+      }
+    });
+    const geometry = parts.length ? mergeGeometries(parts) : new THREE.BufferGeometry();
+    parts.forEach(part => part.dispose());
+    this.fastTraffic.geometry.dispose();
+    this.fastTraffic.geometry = geometry;
+  }
+
   private clock() {
     return this.clockBase + (this.running ? (performance.now() - this.clockAt) / 1000 * CLOCK_MINUTES_PER_SECOND : 0);
   }
@@ -729,15 +810,16 @@ export class CityWorld {
       const palette = truck ? TRUCK_COLORS : kind === VehicleKind.Shopper ? SHOPPER_COLORS : CAR_COLORS;
       mesh.setColorAt(i, palette[Math.floor(car.driver.shade * palette.length)]!);
     });
-    mesh.count = sim.cars.length;
+    const fast = this.speed === 1 || this.speed === 3;
+    mesh.count = fast ? 0 : sim.cars.length;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     this.wheels = this.ensure(this.wheels, sim.cars.length);
     (this.wheels.instanceMatrix.array as Float32Array).set(matrix.subarray(0, sim.cars.length * 16));
-    this.wheels.count = sim.cars.length;
+    this.wheels.count = fast ? 0 : sim.cars.length;
     this.wheels.instanceMatrix.needsUpdate = true;
     // Lights share each car's transform; they are only drawn between dusk and dawn.
-    const lit = this.night > .05 ? sim.cars.length : 0;
+    const lit = !fast && this.night > .05 ? sim.cars.length : 0;
     this.lamps = this.ensure(this.lamps, lit);
     this.beams = this.ensure(this.beams, lit);
     for (const lights of [this.lamps, this.beams]) {
@@ -893,6 +975,8 @@ export class CityWorld {
     switch (this.overlay) {
       case "desirability":
         return c.set("#647574");
+      case "pollution":
+        return ramp(pollutionRamp, tile.pollution, c);
       case "water":
         return c.set(tile.pipe ? "#20d6ed" : "#647574");
       case "elevation":
@@ -932,6 +1016,7 @@ export class CityWorld {
       const score = tile.desirability?.score;
       return c.set(score === undefined ? "#647574" : score < 40 ? "#d55948" : score < 50 ? "#eacb66" : score < 70 ? "#91bd75" : "#42bcaa");
     }
+    if (this.overlay === "pollution") return ramp(pollutionRamp, tile.pollution, c);
     if (this.overlay === "water") return c.set(tile.pipe ? "#20d6ed" : tile.kind === "waterworks" ?
       (tile.facility?.operating ? "#60ce8f" : "#d55948") : tile.waterService ?
       (tile.waterService.fraction >= .999 ? "#60ce8f" : tile.waterService.fraction > 0 ? "#eacb66" : "#d55948") : "#647574");
@@ -1274,8 +1359,9 @@ export class CityWorld {
 
   private spinWindRotors(seconds: number) {
     const wind = THREE.MathUtils.clamp(this.city?.powerWind ?? .5, 0, 1);
+    const rate = this.speed === 3 ? 12 : this.speed === 1 ? 6 : 1;
     for (const [i, rotor] of this.windRotorPositions.entries()) {
-      rotor.angle += seconds * (.15 + wind * 2.5);
+      rotor.angle += seconds * rate * (.15 + wind * 2.5);
       this.dummy.position.set(rotor.x, rotor.y, rotor.z);
       this.dummy.rotation.set(rotor.angle, 0, 0);
       this.dummy.scale.set(1, 1, 1);
@@ -1645,10 +1731,11 @@ export class CityWorld {
     this.reportedFrames += 1;
     const seconds = Math.min(.1, (now - this.last) / 1000);
     this.last = now;
-    this.swayTime.value = now / 1000;
+    if (this.running) this.effectTime += seconds;
+    this.swayTime.value = this.effectTime;
     this.panWithKeys(seconds);
     const clock = this.clock();
-    if (this.showcase) this.tour(clock, seconds);
+    if (this.showcase) this.tour(clock, this.running ? seconds : 0);
     else this.controls.update();
     this.clampTarget();
     updateCityCameraDepth(this.camera, this.controls.target);
@@ -1661,18 +1748,23 @@ export class CityWorld {
       this.refreshNeighbours();
     }
     this.refreshDistanceLods(now);
-    const minute = ((clock % DAY) + DAY) % DAY;
+    const fast = this.speed === 1 || this.speed === 3;
+    const minute = fast ? DAY / 2 : ((clock % DAY) + DAY) % DAY;
+    const visualClock = fast ? Math.floor(clock / DAY) * DAY + DAY / 2 : clock;
     this.light(minute);
     if (this.detailed) {
-      this.lightWindows(clock);
+      this.lightWindows(visualClock);
       this.puff(clock);
-      this.spinWindRotors(seconds);
+      this.spinWindRotors(this.running ? seconds : 0);
       for (const { world } of this.neighbours.values()) {
+        world.speed = this.speed;
+        world.running = this.running;
+        world.fastTraffic.visible = fast;
         world.swayTime.value = this.swayTime.value;
         world.night = this.night;
-        world.lightWindows(clock);
+        world.lightWindows(visualClock);
         world.puff(clock);
-        world.spinWindRotors(seconds);
+        world.spinWindRotors(this.running ? seconds : 0);
       }
     }
     const active = this.drive(clock);

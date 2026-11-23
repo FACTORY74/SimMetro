@@ -49,13 +49,23 @@ export function createSurface(size: number, heightAt: (x: number, z: number) => 
     levels[(n - 1) * n + i] = edges[2]![i]!;
     levels[i * n] = edges[3]![i]!;
   }
+  // This ring must match the eight-triangle fan used by CityWorld.buildTerrain.
+  const ring = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]] as const;
   const levelAt = (x: number, z: number) => {
-    const u = Math.min(Math.max(x * 2, 0), n - 1), v = Math.min(Math.max(z * 2, 0), n - 1);
-    const i = Math.min(Math.floor(u), n - 2), j = Math.min(Math.floor(v), n - 2);
-    const fu = u - i, fv = v - j;
-    const a = levels[j * n + i]!, b = levels[j * n + i + 1]!;
-    const c = levels[(j + 1) * n + i]!, d = levels[(j + 1) * n + i + 1]!;
-    return (a + (b - a) * fu) * (1 - fv) + (c + (d - c) * fu) * fv;
+    const px = Math.min(Math.max(x, 0), size), pz = Math.min(Math.max(z, 0), size);
+    const tx = Math.min(Math.floor(px), size - 1), tz = Math.min(Math.floor(pz), size - 1);
+    const u = px - tx, v = pz - tz;
+    const angle = (Math.atan2(u - .5, .5 - v) + Math.PI * 2) % (Math.PI * 2);
+    const k = (Math.floor(angle / (Math.PI / 4)) + 1) % 8;
+    const a = ring[k]!, b = ring[(k + 1) % 8]!;
+    // Barycentric interpolation inside centre-a-b, exactly matching the rendered triangle.
+    const ax = a[0] - .5, az = a[1] - .5, bx = b[0] - .5, bz = b[1] - .5;
+    const qx = u - .5, qz = v - .5, det = ax * bz - az * bx;
+    const wa = (qx * bz - qz * bx) / det, wb = (ax * qz - az * qx) / det;
+    const at = levels[(2 * tz + a[1] * 2) * n + 2 * tx + a[0] * 2]!;
+    const bt = levels[(2 * tz + b[1] * 2) * n + 2 * tx + b[0] * 2]!;
+    const centre = levels[(2 * tz + 1) * n + 2 * tx + 1]!;
+    return centre * (1 - wa - wb) + at * wa + bt * wb;
   };
   return { size, levels, levelAt, groundAt: (x, z) => groundY(levelAt(x, z)) };
 }

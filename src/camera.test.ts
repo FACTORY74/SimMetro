@@ -68,6 +68,14 @@ test("adjacent levels meet on a ramp while plateaus stay flat", () => {
   assert.ok(Math.abs(surface.groundAt(5.5, 4.5) - surface.groundAt(4.5, 4.5) - .6) < 1e-6);
 });
 
+test("surface sampling matches the rendered eight-triangle fan on warped tiles", () => {
+  const surface = createSurface(3, (x, z) => x * x + z * 3);
+  const n = 2 * surface.size + 1;
+  // (.25, .1) lies 20% at the centre, 30% at the north midpoint and 50% at NW.
+  const centre = surface.levels[n + 1]!, north = surface.levels[1]!, northwest = surface.levels[0]!;
+  assert.ok(Math.abs(surface.levelAt(.25, .1) - (centre * .2 + north * .3 + northwest * .5)) < 1e-6);
+});
+
 test("shared border samples keep different district heights joined", () => {
   const left = createSurface(2, () => 20, [[20, 20, 20, 20, 20.5], [20.5, 20.5, 20.5, 20.5, 20.5],
     [20, 20, 20, 20, 20.5], [20, 20, 20, 20, 20]]);
@@ -108,7 +116,7 @@ test("building diversity includes different silhouettes at every zone, subtype a
     for (let level = 1; level <= top; level++) {
       for (let x = 0; x < 20; x++) {
         const tile: Tile = { x, z: 90, height: 1, water: false, kind, variant, level,
-          powered: true, connected: true, workers: 0, residents: kind === "residential" ? level * 24 : 0, condition: 100, traffic: 0,
+          powered: true, connected: true, workers: 0, residents: kind === "residential" ? level * 24 : 0, condition: 100, traffic: 0, pollution: 0, trees: 0,
           powerDemand: 0, powerSupply: 0, powerGrid: 0, batteryCharge: 0 };
         const model = buildingModel(tile, 42)!;
         names.add(model.name);
@@ -128,7 +136,7 @@ test("building diversity includes different silhouettes at every zone, subtype a
 
 test("derelict businesses have boarded glazing and debris without losing their building", () => {
   const tile: Tile = { x: 95, z: 94, height: 1, water: false, kind: "commercial", variant: "",
-    level: 4, powered: true, connected: true, workers: 0, residents: 0, condition: 100, traffic: 0,
+    level: 4, powered: true, connected: true, workers: 0, residents: 0, condition: 100, traffic: 0, pollution: 0, trees: 0,
     powerDemand: 0, powerSupply: 0, powerGrid: 0, batteryCharge: 0 };
   const maintained = buildingModel(tile, 42)!;
   const derelict = buildingModel({ ...tile, condition: 0 }, 42)!;

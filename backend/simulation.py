@@ -20,7 +20,8 @@ from backend.catalogue import definitions
 TILE_COUNT = SIZE * SIZE
 ORIGIN = 20  # Offset of the starter-town layout within a district.
 MAX_TERRAFORM_TILES = 4000
-SAVE_VERSION = 11
+SAVE_VERSION = 12
+POLLUTION_STEP_MINUTES = 360
 CODES = {"empty": ".", "road": "=", "residential": "r", "commercial": "c",
          "industrial": "i", "power": "p", "park": "k", "powerline": "l", "waterworks": "w", "service": "s"}
 # Subtypes, one character each; the first listed is the default.
@@ -76,6 +77,8 @@ class Tile:
     workers: int = 0
     occupants: int = 0
     condition: int = 100
+    pollution: float = 0.0
+    trees: int = 0
     variant: str = ""
     facility_id: int = 0
     facility_root: bool = False
@@ -267,8 +270,10 @@ STARTER_LAYOUT = tuple(_starter_layout())
 
 
 class City:
-    def __init__(self, seed: int = 42, *, heights: tuple[int, ...] | None = None, starter: bool = True):
+    def __init__(self, seed: int = 42, *, heights: tuple[int, ...] | None = None, starter: bool = True,
+                 district: tuple[int, int] = (0, 0)):
         self.seed = seed
+        self.district = district
         self.terrain_generator = GENERATOR_VERSION
         self.tick = 0
         self.revision = 0
@@ -303,6 +308,7 @@ class City:
         self.battery_storage: dict[int, float] = {}
         self.power_clock = float(START_CLOCK)
         self._power_accumulator = 0.0
+        self._pollution_accumulator = 0.0
         self.power_history: list[dict] = []
         self._snapshot: dict | None = None
         heights = generate_heights(seed) if heights is None else heights
@@ -414,6 +420,7 @@ class City:
         industrial_jobs = sum(t.job_capacity for t in active if t.kind == "industrial")
         self.jobs = commercial_jobs + industrial_jobs
         self.employed = sum(t.workers for t in active)
+        self._recalculate_trees()
         self.income = self.population * 2 + sum(
             t.workers * t.condition // 100 for t in active if t.kind in BUSINESSES)
         self.expenses = sum(road_type(t).upkeep for t in tiles if t.kind == "road") + sum(
@@ -428,6 +435,63 @@ class City:
             "commercial": max(5, min(95, 35 + (self.population * .22 - commercial_jobs) / 3)),
             "industrial": max(5, min(95, 50 + (self.population * .4 - industrial_jobs) / 4)),
         }
+
+    @staticmethod
+    def _tree_hash(x: int, z: int, salt: int = 0) -> float:
+        return (((x * 73856093) ^ (z * 19349663) ^ (salt * 83492791)) & 0xFFFFFFFF) % 1000 / 1000
+
+    @classmethod
+    def _tree_noise(cls, x: int, z: int, cell: int, salt: int) -> float:
+        gx, gz = x / cell, z / cell
+        x0, z0 = math.floor(gx), math.floor(gz)
+        fx, fz = gx - x0, gz - z0
+        sx, sz = _smooth(fx), _smooth(fz)
+        a, b = cls._tree_hash(x0, z0, salt), cls._tree_hash(x0 + 1, z0, salt)
+        c, d = cls._tree_hash(x0, z0 + 1, salt), cls._tree_hash(x0 + 1, z0 + 1, salt)
+        return (a + (b - a) * sx) * (1 - sz) + (c + (d - c) * sx) * sz
+
+    def _recalculate_trees(self):
+        """Count the same wild/park trees represented by the landscape renderer."""
+        ox, oz = self.district[0] * SIZE, self.district[1] * SIZE
+        for tile in self.tiles:
+            if tile.kind == "park":
+                tile.trees = 5
+            elif tile.kind == "empty" and 1 <= tile.height < 30:
+                x, z = tile.x + ox, tile.z + oz
+                wood = self._tree_noise(x, z, 9, 7) * .7 + self._tree_noise(x, z, 3, 8) * .3
+                roll = self._tree_hash(x, z)
+                tile.trees = 3 if wood > .7 else 2 if wood > .6 else (1 if roll < .35 else 0) if wood > .48 else (1 if roll < .05 else 0)
+            else:
+                tile.trees = 0
+
+    @staticmethod
+    def _emissions(tile: Tile) -> float:
+        """Pollution units emitted per game day by each occupied city element."""
+        level = max(1, tile.level)
+        if tile.kind == "road": return {"r": .12, "s": .18, "a": .28, "e": .4}.get(tile.subtype, .12)
+        if tile.kind == "residential": return .08 * level
+        if tile.kind == "commercial": return .18 * level
+        if tile.kind == "industrial": return {"m": 8., "t": 1., "f": .35}.get(tile.subtype, 2.) * level
+        if tile.kind == "power":
+            if tile.installation_part > 0 and not tile.facility_root: return 0.
+            return {"c": 18., "n": .6, "s": .08, "w": .04, "b": .08}.get(tile.subtype, .2)
+        return {"park": .02, "powerline": .01, "waterworks": .1, "service": .15}.get(tile.kind, 0.)
+
+    def _advance_pollution(self, minutes: float) -> bool:
+        """Emit, diffuse and remove pollution without changing gameplay consumers yet."""
+        days = minutes / DAY_MINUTES
+        previous = [tile.pollution for tile in self.tiles]
+        changed = False
+        for i, tile in enumerate(self.tiles):
+            neighbours = ADJ[i]
+            local = previous[i]
+            mixed = local * .88 + (sum(previous[j] for j in neighbours) / len(neighbours) if neighbours else local) * .12
+            # Background air clears slowly; trees are a substantially stronger local sink.
+            retained = math.exp(-days * (.07 + tile.trees * .10))
+            value = min(100., max(0., mixed * retained + self._emissions(tile) * days))
+            changed |= abs(value - tile.pollution) > .0001
+            tile.pollution = value
+        return changed
 
     def _changed(self, terrain: bool = False):
         self.revision += 1
@@ -720,6 +784,7 @@ class City:
         elapsed = seconds * CLOCK_MINUTES_PER_SECOND
         self.clock += elapsed
         self._power_accumulator += elapsed
+        self._pollution_accumulator += elapsed
         changed = False
         stepped = False
         while self._power_accumulator >= STEP_MINUTES - 1e-9:
@@ -737,6 +802,12 @@ class City:
                 self.record_power()
         if changed:
             self.recalculate(refresh_power=False)
+        pollution_changed = False
+        while self._pollution_accumulator >= POLLUTION_STEP_MINUTES - 1e-9:
+            self._pollution_accumulator = max(0., self._pollution_accumulator - POLLUTION_STEP_MINUTES)
+            pollution_changed |= self._advance_pollution(POLLUTION_STEP_MINUTES)
+        if pollution_changed:
+            stepped = True
         if stepped:
             self.revision += 1
         if self.speed == "day":
@@ -859,6 +930,8 @@ class City:
                 "residents": [t.residents for t in tiles],
                 "condition": [t.condition for t in tiles],
                 "traffic": traffic.volume,
+                "pollution": [round(t.pollution, 2) for t in tiles],
+                "trees": [t.trees for t in tiles],
                 "power_demand": [round(self.grid.loads.get(i, 0), 3) for i in range(TILE_COUNT)],
                 "power_supply": [round(self.grid.outputs.get(i, 0), 3) for i in range(TILE_COUNT)],
                 "power_grid": [self.grid.grid_of.get(i, -1) for i in range(TILE_COUNT)],
@@ -872,6 +945,8 @@ class City:
                 "terrain_generator": self.terrain_generator,
                 "fast_seconds": self._fast_seconds,
                 "money": self.money, "speed": self.speed, "clock": self.clock,
+                "pollution": [t.pollution for t in self.tiles],
+                "pollution_accumulator": self._pollution_accumulator,
                 "heights": [t.height for t in self.tiles],
                 "kinds": "".join(CODES[t.kind] for t in self.tiles),
                 "variants": "".join(t.subtype or "." for t in self.tiles),
@@ -898,7 +973,7 @@ class City:
         if data.get("version") == 1:
             raise ValueError("This save is from the earlier 40 × 40 map and is not compatible "
                              "with the 100 x 100 district map.")
-        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10, SAVE_VERSION):
+        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SAVE_VERSION):
             raise ValueError("Unsupported save format.")
         if isinstance(data.get("heights"), list) and len(data["heights"]) == 200 * 200:
             data = expand_legacy_map(data)
@@ -931,6 +1006,16 @@ class City:
         if type(fast_seconds) not in (int, float) or not 0 <= fast_seconds < FAST_MONTH_SECONDS:
             raise ValueError("Invalid saved fast clock.")
         city._fast_seconds = float(fast_seconds)
+        pollution = data.get("pollution", [0.] * TILE_COUNT) if data["version"] >= 12 else [0.] * TILE_COUNT
+        pollution_accumulator = data.get("pollution_accumulator", 0.) if data["version"] >= 12 else 0.
+        if (not isinstance(pollution, list) or len(pollution) != TILE_COUNT or
+                any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 100 for v in pollution) or
+                type(pollution_accumulator) not in (int, float) or not math.isfinite(pollution_accumulator) or
+                not 0 <= pollution_accumulator < POLLUTION_STEP_MINUTES):
+            raise ValueError("Invalid saved pollution state.")
+        city._pollution_accumulator = float(pollution_accumulator)
+        for tile, value in zip(city.tiles, pollution):
+            tile.pollution = float(value)
         conditions = data.get("conditions") if data["version"] >= 3 else [100] * TILE_COUNT
         if (not isinstance(conditions, list) or len(conditions) != TILE_COUNT or
                 any(type(c) is not int or not 0 <= c <= 100 for c in conditions)):

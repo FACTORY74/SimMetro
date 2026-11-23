@@ -419,10 +419,11 @@ class World:
         """Create a live district aligned to the region clock, if necessary."""
         if key in self.cities:
             return
-        city = City(self.seed, heights=terrain(self.seed, *key, self.base, self.generator), starter=False)
+        city = City(self.seed, heights=terrain(self.seed, *key, self.base, self.generator), starter=False, district=key)
         city.terrain_generator = self.generator
         city.tick, city.clock = previous.tick, previous.clock
         city.power_clock, city._power_accumulator = previous.power_clock, previous._power_accumulator
+        city._pollution_accumulator = previous._pollution_accumulator
         city._fast_seconds, city.speed = previous._fast_seconds, previous.speed
         city.history = []
         city.power_history = []
@@ -543,7 +544,9 @@ class World:
                     # Rendering data does not allocate simulations for pristine neighbours.
                     detail = dict(seed=self.seed, desirability=city.desirability() if city else None, water=city.water_network.data() if city else None,
                                   heights=[t.height for t in city.tiles] if city else terrain(self.seed, *key, self.base, self.generator),
-                                  lots=lots, powerLines=city.grid.lines if city else [],
+                                  lots=lots, pollution=[round(t.pollution, 2) for t in city.tiles] if city else None,
+                                  trees=[t.trees for t in city.tiles] if city else None,
+                                  powerLines=city.grid.lines if city else [],
                                   edges=mesh["edges"],
                                   terrainRevision=city.terrain_revision if city else 0)
                     detail["stamp"] = self.render_id + ":" + str(hash((detail["terrainRevision"], tuple(tuple(lot) for lot in lots),
@@ -595,6 +598,8 @@ class World:
             if key in cities:
                 raise ValueError("Duplicate saved district.")
             city = City.restore(entry.get("state"))
+            city.district = key
+            city._recalculate_trees()
             if city.seed != data["seed"]:
                 raise ValueError("District seed differs from region seed.")
             cities[key] = city

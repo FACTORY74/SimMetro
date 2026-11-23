@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test src/camera.test.ts src/traffic.test.ts src/nature.test.ts src/buildings.test.ts src/sync.test.ts src/region.test.ts src/water.test.ts",
+    "test": "node --test src/camera.test.ts src/traffic.test.ts src/nature.test.ts src/buildings.test.ts src/sync.test.ts src/region.test.ts src/water.test.ts src/desirability.test.ts",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1"

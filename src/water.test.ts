@@ -5,7 +5,7 @@ import { buildingModel } from "./buildings.ts";
 import { attachWater, type Tile, type WaterData, type WaterFacility } from "./types.ts";
 
 const tile = (x: number, z: number): Tile => ({ x, z, height: 1, water: false, kind: "waterworks", variant: "p",
-  level: 0, powered: true, connected: true, workers: 0, residents: 0, condition: 100, traffic: 0,
+  level: 0, powered: true, connected: true, workers: 0, residents: 0, condition: 100, traffic: 0, pollution: 0, trees: 0,
   powerDemand: 12, powerSupply: 0, powerGrid: 1, batteryCharge: 0 });
 
 test("facility preview rotations preserve footprints and put entrances outside the correct edge", () => {

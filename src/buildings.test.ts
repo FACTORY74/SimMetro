@@ -21,7 +21,7 @@ test("home windows light up in the evening and early morning, differently each d
 });
 
 const tile = (kind: Tile["kind"], level: number, x = 4, z = 7, variant = ""): Tile => ({
-  x, z, kind, variant, level, height: 1, water: false, powered: true, connected: true, workers: 20, residents: kind === "residential" ? level * 24 : 0, condition: 100, traffic: 0,
+  x, z, kind, variant, level, height: 1, water: false, powered: true, connected: true, workers: 20, residents: kind === "residential" ? level * 24 : 0, condition: 100, traffic: 0, pollution: 0, trees: 0,
   powerDemand: 0, powerSupply: 0, powerGrid: null, batteryCharge: 0,
 });
 

@@ -1,7 +1,7 @@
 export type Zone = "residential" | "commercial" | "industrial";
 export type Kind = Zone | "empty" | "road" | "power" | "park" | "powerline" | "waterworks" | "service";
 export type Tool = Exclude<Kind, "empty"> | "bulldoze" | "inspect" | "terrain" | "raise" | "lower" | "level" | "pipe" | "remove_pipe";
-export type Overlay = "normal" | "power" | "access" | "zones" | "elevation" | "traffic" | "water" | "desirability";
+export type Overlay = "normal" | "power" | "access" | "zones" | "elevation" | "traffic" | "water" | "desirability" | "pollution";
 export type Speed = 0 | "day" | 1 | 3;
 export interface Cell { x: number; z: number }
 export interface Tile extends Cell {
@@ -17,6 +17,10 @@ export interface Tile extends Cell {
   residents: number;
   condition: number;
   traffic: number;
+  /** Ambient concentration from nearby emitting land uses, from 0 (clean) to 100. */
+  pollution: number;
+  /** Number of pollution-removing trees rooted on this square. */
+  trees: number;
   powerDemand: number;
   powerSupply: number;
   powerGrid: number | null;
@@ -129,7 +133,7 @@ export interface RawCityState extends Omit<CitySummary, "trafficRevision" | "roa
   power_wind: number;
   power_lines: [number, number][];
   tiles: { height: number[]; kind: string; variant: string; level: string; powered: string; connected: string;
-    workers: number[]; residents: number[]; condition: number[]; traffic: number[];
+    workers: number[]; residents: number[]; condition: number[]; traffic: number[]; pollution?: number[]; trees?: number[];
     power_demand: number[]; power_supply: number[]; power_grid: number[]; battery_charge: number[]; installation_part?: number[] };
 }
 export interface UnchangedState { unchanged: true; session: string; revision: number; clock: number }
@@ -166,6 +170,8 @@ export function decodeState(raw: RawCityState): CityState {
       level: Number(tiles.level[i] ?? 0),
       powered: tiles.powered[i] === "1", connected: tiles.connected[i] === "1",
       workers: tiles.workers[i]!, residents: tiles.residents[i]!, condition: tiles.condition[i]!, traffic: tiles.traffic[i]!,
+      pollution: tiles.pollution?.[i] ?? 0,
+      trees: tiles.trees?.[i] ?? 0,
       powerDemand: tiles.power_demand[i]!, powerSupply: tiles.power_supply[i]!,
       powerGrid: tiles.power_grid[i] === -1 ? null : tiles.power_grid[i]!,
       batteryCharge: tiles.battery_charge[i]!,

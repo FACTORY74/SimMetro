@@ -1,4 +1,6 @@
 import { DesirabilityInspector, DesirabilityStatus } from "./desirability";
+import { AdviserPanel } from "./advisers";
+import { TileInspectorDialog } from "./tileAdvisers";
 import { WaterStatus } from "./water";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -16,7 +18,7 @@ const dollars = (value: number) => `${value < 0 ? "-" : ""}$${number(Math.abs(va
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const SPEEDS: { speed: Speed; label: string; title: string }[] = [
   { speed: 0, label: "Ⅱ", title: "Pause simulation" },
-  { speed: "day", label: "Day", title: "Live: one day per minute, one month every 30 minutes" },
+  { speed: "day", label: "60s/day", title: "Game real-time: 60 seconds per day, one month every 30 minutes" },
   { speed: 1, label: "1×", title: "Fast: one month every 2 seconds" },
   { speed: 3, label: "3×", title: "Fastest: three months every 2 seconds" },
 ];
@@ -399,6 +401,7 @@ function App() {
           <li key={i}>Month {entry.month}: {entry.tool} ({dollars(entry.cost)}) - {entry.reason}</li>)}</ol></details>
       </section>
       <DesirabilityStatus data={city?.desirability} onOverlay={() => setOverlay("desirability")} />
+      <AdviserPanel city={city ?? undefined} onOverlay={setOverlay} />
       <WaterStatus data={city?.water} onOverlay={() => setOverlay("water")} />
       <PowerStatus summary={city?.power} onOpen={() => setPowerReport(true)} />
       <section className="panel overview">
@@ -437,12 +440,12 @@ function App() {
         <div className="section-label">MAP LAYERS</div>
         <select aria-label="Map layer" value={overlay} onChange={event => setOverlay(event.target.value as Overlay)}>
           <option value="normal">City view</option><option value="zones">Land use</option>
-          <option value="desirability">Desirability</option><option value="water">Water pipes &amp; supply</option><option value="power">Power grid</option><option value="access">Road access</option>
+          <option value="desirability">Desirability</option><option value="pollution">Pollution</option><option value="water">Water pipes &amp; supply</option><option value="power">Power grid</option><option value="access">Road access</option>
           <option value="elevation">Terrain elevation</option><option value="traffic">Traffic volume</option>
         </select>
         <label className="layer-toggle"><input type="checkbox" checked={showTileBoundaries}
           onChange={event => setShowTileBoundaries(event.target.checked)} /> Show simulation tile boundaries</label>
-        {overlay !== "normal" && <p className="layer-help">{overlay === "desirability" ? "Red: below 40 / yellow: 40-49 / green: 50-69 / teal: 70+. Grey: not zoned. Suitability only; essential services and demand still apply." : overlay === "water" ? "Cyan: underground pipe / green: supplied / yellow: partial / red: shortage / grey: no consumer. Pipe colour takes precedence; inspect for supply." : overlay === "zones" ? "Green: homes · Blue: shops · Gold: industry" :
+        {overlay !== "normal" && <p className="layer-help">{overlay === "pollution" ? "Green: clean / yellow: elevated / orange: unhealthy / red and purple: severe. Buildings are ghosted so the concentration field remains visible." : overlay === "desirability" ? "Red: below 40 / yellow: 40-49 / green: 50-69 / teal: 70+. Grey: not zoned. Suitability only; essential services and demand still apply." : overlay === "water" ? "Cyan: underground pipe / green: supplied / yellow: partial / red: shortage / grey: no consumer. Pipe colour takes precedence; inspect for supply." : overlay === "zones" ? "Green: homes · Blue: shops · Gold: industry" :
           overlay === "elevation" ? "Blue: below sea level · Sand: shore · Green to white: higher ground" :
           overlay === "traffic" ? "Daily peak: green quiet / yellow busy / red over each road type's capacity" :
           "Green: served · Red: not served"}</p>}
@@ -459,10 +462,7 @@ function App() {
       </section>
     </aside>
 
-    {tile && <section className="panel inspector">
-      <button className="close" aria-label="Close inspector" onClick={() => setSelected(null)}>×</button>
-      <div className="section-label">TILE {tile.x}, {tile.z}</div>
-      <h3>{tile.water ? "Open water" : tile.kind === "empty" ? "Undeveloped land" : tile.kind}</h3>
+    {tile && city && <TileInspectorDialog tile={tile} city={city} onClose={() => setSelected(null)} metrics={<>
       {tile.desirability && <DesirabilityInspector data={tile.desirability} />}
       {tile.pipe && <p>Underground water pipe. Use Remove pipes (K) to cut it.</p>}
       {tile.waterService && <p>Water: {tile.waterService.served.toFixed(1)} / {tile.waterService.requested.toFixed(1)} m?/day<br />
@@ -482,6 +482,8 @@ function App() {
         <p>80% staffing maintains and repairs this building.</p>
       </>}
       {tile.kind === "road" && city && <p>Peak traffic: {number(tile.traffic)} cars · {Math.round(tile.traffic / roadType(tile).capacity * 100)}% of capacity</p>}
+      <p>Pollution: {tile.pollution.toFixed(1)} / 100</p>
+      <p>Trees: {tile.trees} · enhanced pollution removal</p>
       {tile.kind !== "empty" && <>
         <p>Electrical grid: {tile.powerGrid === null ? "Disconnected" : `#${tile.powerGrid + 1}`}</p>
         <p>Power demand: {tile.powerDemand.toFixed(2)} kW</p>
@@ -492,7 +494,7 @@ function App() {
         {routine.map((r, i) => <p key={i}><strong>{r.label}</strong><br /><span>{r.detail}</span></p>)}</div>}
       <div className="inspector-services"><span className={tile.powered ? "positive" : "negative"}>{tile.powered ? "Powered" : "No power"}</span>
         <span className={tile.connected ? "positive" : "negative"}>{tile.connected ? "Road access" : "No road access"}</span></div>
-    </section>}
+    </>} />}
 
     <div className="map-caption"><span className="compass">N ↑</span><span>NEW HARBOURSIDE<br /><small>{city?.size ?? 100} × {city?.size ?? 100} · COASTAL REGION</small></span></div>
     <footer className="bottom-bar panel">
@@ -505,6 +507,7 @@ function App() {
       </div>
       <div className="time-controls"><span className="date">{date}<small>Day {day} · {time(live.clock)}</small></span><div className="speed-buttons">
         {SPEEDS.map(({ speed, label, title }) => <button key={speed} aria-label={title} title={title}
+          style={speed === "day" ? { width: 58 } : undefined}
           aria-pressed={city?.speed === speed} className={city?.speed === speed ? "selected" : ""}
           disabled={!city || busy} onClick={() => void action(async () => accept(await requestState("speed", { speed })))}>
           {label}
