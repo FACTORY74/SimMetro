@@ -5,8 +5,10 @@ from fastapi.testclient import TestClient
 
 from backend import app as app_module
 from backend.region import Region
-from backend.simulation import ADJ, ORIGIN, SIZE, TILE_COUNT, City, generate_heights
+from backend.simulation import ADJ, COSTS, LANDFILL_CAPACITY, ORIGIN, POLLUTION_STEP_MINUTES, SIZE, TILE_COUNT, City, generate_heights
+from backend.traffic import _quickest
 from backend.terrain import world_heights
+from backend.weather import weather
 
 
 def find(city, predicate):
@@ -65,6 +67,130 @@ class TerrainTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_highway_uses_three_wide_footprint_and_ramps_control_access(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        city.money = 100_000
+        city.build("road", [(15, 15)], "h")
+        self.assertEqual(sum(city.at(x, z).kind == "road" for z in range(14, 17)
+                             for x in range(14, 17)), 9)
+        cost = city.build("road", [(x, 40) for x in range(25, 36)], "h")
+        self.assertGreater(cost, 0)
+        self.assertEqual([city.at(30, z).variant for z in (39, 40, 41)], ["b", "h", "b"])
+        self.assertEqual(city.at(30, 40).road_access, True)
+        home = city.at(34, 38)
+        home.kind, home.variant, home.level, home.occupants = "residential", "h", 1, 10
+        city.recalculate()
+        self.assertFalse(home.road_access, "highway shoulders do not serve local lots")
+        with self.assertRaisesRegex(ValueError, "leave the side"):
+            city.build("road", [(30, 40)], "m", rotation=1)
+        city.build("road", [(30, 40)], "m", rotation=0)
+        city.build("road", [(30, 36)], "r")
+        city.recalculate()
+        self.assertEqual([city.at(30, z).variant for z in (37, 38, 39)], ["m", "m", "m"])
+        self.assertEqual(city._components[40 * SIZE + 30], city._components[36 * SIZE + 30])
+        self.assertEqual(City.restore(city.save_data()).at(30, 40).variant, "h")
+
+    def test_highway_junction_occupies_nine_by_nine_and_joins_crossing_routes(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        city.money = 100_000
+        city.build("road", [(x, 50) for x in range(45, 56)], "h")
+        city.build("road", [(50, z) for z in range(45, 56)], "h")
+        city.build("road", [(50, 50)], "x")
+        self.assertEqual(sum(city.at(x, z).kind == "road" for z in range(46, 55)
+                             for x in range(46, 55)), 81)
+        self.assertEqual(city.at(50, 50).variant, "j")
+        self.assertEqual(city.at(52, 52).variant, "g")
+        self.assertEqual(city.at(53, 52).variant, "c")
+        self.assertIn(53 * SIZE + 50, city._traffic_adj[53 * SIZE + 49])
+        self.assertEqual(city._components[50 * SIZE + 46], city._components[46 * SIZE + 50])
+        def route(end):
+            start = 46 * SIZE + 50
+            _, parent = _quickest([start], [end], lambda i: city._components[i] == city._components[start],
+                                  city._traffic_adj, [0] * TILE_COUNT, city.tiles)
+            path = []
+            while end != -1:
+                path.append(city.tiles[end].variant)
+                end = parent[end]
+            return path
+        self.assertIn("c", route(50 * SIZE + 54), "turns use the curved slip lane")
+        self.assertIn("j", route(54 * SIZE + 50), "through traffic keeps the direct crossing")
+
+    def test_landfill_zone_can_be_painted_and_has_upkeep(self):
+        self.assertEqual(app_module.BuildRequest(tool="landfill", cells=[{"x": 40, "z": 40}]).tool, "landfill")
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        city.money = 1000
+        city.at(42, 40).kind = "road"
+        city.recalculate()
+        before = city.expenses
+        cost = city.build("landfill", [(40, 40), (41, 40), (42, 40)])
+        self.assertEqual(cost, 2 * COSTS["landfill"])
+        self.assertEqual(city.at(42, 40).kind, "road")
+        self.assertEqual(city.at(40, 40).kind, "landfill")
+        self.assertEqual(city.expenses, before + 6)
+
+    def test_landfill_collects_until_full_then_uncollected_trash_damages_buildings(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        for x in range(48, 56):
+            city.at(x, 50).kind = "road"
+        home, shop, dump = city.at(50, 49), city.at(52, 49), city.at(54, 49)
+        home.kind, home.variant, home.level, home.occupants = "residential", "h", 1, 24
+        shop.kind, shop.variant, shop.level = "commercial", "r", 1
+        dump.kind = "landfill"
+        city.recalculate()
+        shop.workers = 12
+        city._advance_trash()
+        self.assertEqual((home.trash, shop.trash, dump.trash), (0, 0, 10))
+        dump.trash = LANDFILL_CAPACITY - 2
+        shop.workers = 12
+        city._advance_trash()
+        self.assertEqual(dump.trash, LANDFILL_CAPACITY)
+        self.assertGreater(home.trash + shop.trash, 0)
+        for _ in range(4):
+            shop.workers = 12
+            city._advance_trash()
+        self.assertLess(home.condition, 100)
+        self.assertLess(shop.condition, 100)
+        restored = City.restore(city.save_data())
+        self.assertEqual((restored.at(50, 49).trash, restored.at(52, 49).trash, restored.at(54, 49).trash),
+                         (home.trash, shop.trash, dump.trash))
+
+    def test_landfill_leaks_pollution_within_its_radius(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        dump = city.at(50, 50)
+        dump.kind, dump.trash = "landfill", LANDFILL_CAPACITY
+        city._advance_pollution(POLLUTION_STEP_MINUTES)
+        self.assertGreater(dump.pollution, 0)
+        self.assertGreater(city.at(51, 50).pollution, city.at(54, 50).pollution)
+        self.assertGreater(city.at(54, 50).pollution, 0)
+        self.assertEqual(city.at(55, 50).pollution, 0)
+
+    def test_weather_follows_calendar_and_replays_from_save(self):
+        winter = [weather(42, 0, day * 1440)["condition"] for day in range(30)]
+        summer = [weather(42, 6, day * 1440)["condition"] for day in range(30)]
+        self.assertGreater(winter.count("snow"), summer.count("snow"))
+        self.assertGreater(summer.count("sun"), winter.count("sun"))
+        before, after = weather(42, 0, 1440 - .001), weather(42, 0, 1440)
+        for condition in ("sun", "rain", "snow"):
+            self.assertAlmostEqual(before[condition], after[condition], places=3)
+        halfway = weather(42, 0, 720)
+        self.assertAlmostEqual(sum(halfway[k] for k in ("sun", "rain", "snow")), 1)
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        city.tick, city.clock = 6, 4 * 1440
+        city.power_clock = city.clock
+        self.assertEqual(city.snapshot()["weather"], City.restore(city.save_data()).snapshot()["weather"])
+
+    def test_rain_clears_pollution_faster_than_sun(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        tile = city.at(50, 50)
+        tile.pollution = 50
+        with patch.object(City, "weather", return_value={"sun": 1, "rain": 0, "snow": 0}):
+            city._advance_pollution(POLLUTION_STEP_MINUTES)
+        sunny = tile.pollution
+        tile.pollution = 50
+        with patch.object(City, "weather", return_value={"sun": 0, "rain": 1, "snow": 0}):
+            city._advance_pollution(POLLUTION_STEP_MINUTES)
+        self.assertLess(tile.pollution, sunny)
+
     def test_pollution_is_a_bounded_spatial_field_on_every_tile(self):
         city = City(heights=(1,) * TILE_COUNT, starter=False)
         source = city.at(40, 40)
@@ -85,6 +211,91 @@ class BuildTests(unittest.TestCase):
         self.assertLess(park.pollution, bare.pollution)
         restored = City.restore(city.save_data())
         self.assertEqual([t.pollution for t in restored.tiles], [t.pollution for t in city.tiles])
+
+    def test_natural_woodland_cleans_pollution_faster_than_bare_land(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        wooded = find(city, lambda tile: tile.kind == "empty" and tile.trees > 0)
+        bare = find(city, lambda tile: tile.kind == "empty" and tile.trees == 0)
+        wooded.pollution = bare.pollution = 50
+
+        city._advance_pollution(POLLUTION_STEP_MINUTES)
+
+        self.assertLess(wooded.pollution, bare.pollution)
+
+    def test_coal_plume_reaches_nearby_land_immediately(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        source = city.at(50, 50)
+        source.kind, source.variant = "power", "c"
+        source.facility_root = True
+        city._advance_pollution(POLLUTION_STEP_MINUTES)
+        self.assertGreater(source.pollution, city.at(51, 50).pollution)
+        self.assertGreater(city.at(51, 50).pollution, city.at(54, 50).pollution)
+        self.assertGreater(city.at(54, 50).pollution, 0)
+        self.assertEqual(city.at(56, 50).pollution, 0)
+
+    def test_coal_pollution_becomes_toxic_to_nearby_woodland(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        for tile in city.tiles:
+            tile.trees = 0
+        source = city.at(50, 50)
+        source.kind, source.variant, source.facility_root = "power", "c", True
+        for _ in range(120):
+            city._advance_pollution(POLLUTION_STEP_MINUTES)
+        self.assertGreaterEqual(city.at(51, 50).pollution, 65)
+        self.assertGreaterEqual(city.at(53, 50).pollution, 20)
+        self.assertLess(city.at(70, 50).pollution, .01)
+        city.at(51, 50).trees = 3
+        for _ in range(40):
+            city.tick += 3
+            city._advance_trees()
+        self.assertLess(city.at(51, 50).trees, 3)
+
+    def test_woodland_spreads_and_dies_back_over_quarters_and_survives_save(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        for tile in city.tiles:
+            tile.trees = 0
+        source = city.at(50, 50)
+        source.trees = 3
+        for _ in range(120):
+            city.tick += 3
+            city._advance_trees()
+        self.assertGreater(sum(t.trees for t in city.tiles), 0)
+        self.assertTrue(any(city.tiles[j].trees for j in ADJ[50 * SIZE + 50]))
+        counts = [t.trees for t in city.tiles]
+        city.recalculate()
+        self.assertEqual([t.trees for t in city.tiles], counts)
+        restored = City.restore(city.save_data())
+        self.assertEqual([t.trees for t in restored.tiles], [t.trees for t in city.tiles])
+
+    def test_pollution_prevents_woodland_spread_and_causes_dieback(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        for tile in city.tiles:
+            tile.trees = 0
+            tile.pollution = 100
+        source = city.at(50, 50)
+        source.trees = 3
+        for _ in range(120):
+            city.tick += 3
+            city._advance_trees()
+        self.assertEqual(source.trees, 0)
+        self.assertEqual(sum(t.trees for t in city.tiles), 0)
+
+    def test_forester_plants_only_inside_its_radius_when_operating(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        for tile in city.tiles:
+            tile.trees = 0
+        forester = city.at(50, 50)
+        forester.kind, forester.variant = "service", "w"
+        forester.powered = forester.road_access = True
+        polluted = city.at(51, 50)
+        polluted.pollution = 100
+        for _ in range(120):
+            city.tick += 3
+            city._advance_trees()
+        self.assertGreater(sum(city.at(x, z).trees for z in range(43, 58) for x in range(43, 58)), 0)
+        self.assertEqual(polluted.trees, 0)
+        self.assertEqual(city.at(70, 50).trees, 0)
+        self.assertTrue(all(t.trees <= 3 for t in city.tiles if t.kind == "empty"))
 
     def test_every_built_kind_emits_with_dirty_uses_ranked_highest(self):
         def tile(kind, variant="", level=1):
@@ -134,8 +345,45 @@ class BuildTests(unittest.TestCase):
         city.at(*developed_cell).level = 1
         with self.assertRaisesRegex(ValueError, "Bulldoze"):
             city.build("road", [developed_cell], "r")
-        with self.assertRaisesRegex(ValueError, "Bulldoze"):
-            city.build("industrial", [developed_cell], "m")
+        city.build("industrial", [developed_cell], "m")
+        self.assertEqual(city.at(*developed_cell).kind, "residential")
+        self.assertEqual(city.at(*developed_cell).rezone_kind, "industrial")
+        restored = City.restore(city.save_data())
+        self.assertEqual(restored.at(*developed_cell).rezone_due, city.at(*developed_cell).rezone_due)
+        for _ in range(12):
+            city.advance()
+        self.assertEqual((city.at(*developed_cell).kind, city.at(*developed_cell).variant), ("industrial", "m"))
+        self.assertEqual(city.at(*developed_cell).rezone_kind, "")
+
+    def test_rezoning_a_developed_block_is_staggered_and_can_be_changed_again(self):
+        city = City(heights=(1,) * TILE_COUNT, starter=False)
+        cells = [(x, 40) for x in range(20, 40)]
+        for x, z in cells:
+            tile = city.at(x, z)
+            tile.kind, tile.variant, tile.level = "residential", "h", 2
+            tile.occupants = 12
+        city.recalculate()
+        self.assertEqual(city.build("commercial", cells, "r"), len(cells) * COSTS["commercial"])
+        due = {city.at(x, z).rezone_due for x, z in cells}
+        self.assertGreater(len(due), 1)
+        self.assertTrue(all(city.tick < month <= city.tick + 12 for month in due))
+        self.assertTrue(all(city.at(x, z).occupants == 12 for x, z in cells))
+        self.assertEqual(city.build("commercial", cells, "r"), 0)
+        city.build("industrial", [cells[0]], "m")
+        self.assertEqual(city.at(*cells[0]).rezone_kind, "industrial")
+        for _ in range(12):
+            city.advance()
+        self.assertEqual(city.at(*cells[0]).kind, "industrial")
+        self.assertTrue(all(city.at(x, z).kind == "commercial" for x, z in cells[1:]))
+
+    def test_zoning_stroke_skips_roads_and_water(self):
+        city = City(heights=tuple(-1 if i == 40 * SIZE + 42 else 1 for i in range(TILE_COUNT)), starter=False)
+        city.at(40, 40).kind = "road"
+        cost = city.build("residential", [(40, 40), (41, 40), (42, 40)], "m")
+        self.assertEqual(cost, COSTS["residential"])
+        self.assertEqual(city.at(40, 40).kind, "road")
+        self.assertEqual(city.at(41, 40).kind, "residential")
+        self.assertEqual(city.at(42, 40).kind, "empty")
 
     def test_cannot_build_on_water(self):
         city = City()

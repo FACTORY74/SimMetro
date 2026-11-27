@@ -23,6 +23,12 @@ function tileSpeech(id: AdviserId, tile: Tile, city: CityState): Speech {
       actions: developed ? [{ action: "Protect occupancy and condition", reason: "Reliable services and staffing preserve the economic return from existing development." }] : [{ action: "Avoid over-servicing unused land", reason: "Expand roads and utilities in step with demand and eligible zoning." }], };
   }
   if (id === "health") {
+    if (tile.kind === "landfill") return { headline: (tile.trash ?? 0) >= 300 ? "This landfill is full" : "Landfill capacity is available",
+      detail: `Stored trash: ${tile.trash ?? 0} / 300. A road connection is required for collection; stored waste leaks pollution into nearby land.`,
+      actions: (tile.trash ?? 0) >= 300 ? [{ action: "Add another landfill tile", reason: "A full landfill cannot accept more waste." }] : [], };
+    if (tile.trash) return { headline: "Trash is damaging this building",
+      detail: `${tile.trash} units remain uncollected. The buildup lowers condition each month and can drive residents away.`,
+      actions: [{ action: "Add connected landfill capacity", reason: "Collection needs road access on the same network." }], };
     return { headline: tile.pollution >= 20 ? "Local pollution is elevated" : tile.trees ? "Tree cover is improving local air quality" : "No immediate environmental warning",
       detail: `Pollution is ${tile.pollution.toFixed(1)} / 100 and this tile supports ${tile.trees} tree${tile.trees === 1 ? "" : "s"}. ${tile.waterService && tile.waterService.fraction < 1 ? "Water service is also incomplete." : "Pollution dissipates over time while the simulation runs."}`,
       actions: tile.pollution >= 20 ? [{ action: "Reduce nearby emissions", reason: "Coal, manufacturing and busy infrastructure are the strongest sources." }, { action: "Preserve or add trees", reason: "Each tree increases pollution removal on its square." }] : tile.trees ? [{ action: "Preserve this tree resource", reason: "Building here removes its additional pollution-cleaning capacity." }] : [], };

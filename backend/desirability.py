@@ -62,6 +62,7 @@ def _amenity_index(city, size):
 
 def evaluate(city, plan=None, *, monthly=False):
     plan = city.traffic() if plan is None else plan
+    climate = city.weather()
     size = int(len(city.tiles) ** .5)
     manufacturing, park_networks = _amenity_index(city, size)
     parks_near: dict[int, list[int]] = {}
@@ -140,6 +141,8 @@ def evaluate(city, plan=None, *, monthly=False):
             job_points = 0
         components = [
             dict(label="Base suitability", points=50., detail=f"{profile.replace('_', ' ')} profile"),
+            dict(label="Weather mood", points=float(climate["happiness"]),
+                 detail=f"{climate['condition'].title()} in {climate['season']}"),
             dict(label="Road access", points=0. if tile.road_access else -35., detail="Connected frontage" if tile.road_access else "No adjacent road"),
             dict(label="Local jobs" if tile.kind == "residential" else "Local workforce", points=float(job_points),
                  detail=f"{jobs.get(district, 0) if district is not None else 0} job places; {labor.get(district, 0) if district is not None else 0} workers on this road network"),
@@ -158,6 +161,8 @@ def evaluate(city, plan=None, *, monthly=False):
                 detail=(f"Within {impact['radius']}-tile impact radius; source {distance:.1f} tiles away"
                         if affected else f"Outside {impact.get('radius', 0)}-tile impact radius")))
         for variant, service in SERVICES.items():
+            if variant == "w":
+                continue  # Foresters manage woodland, not zoning suitability.
             distances = [math.hypot(tile.x-sx, tile.z-sz) for sx, sz, kind, _ in operating_services if kind == variant]
             nearest = min(distances) if distances else None
             covered = nearest is not None and nearest <= service.radius

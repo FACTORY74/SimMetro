@@ -86,10 +86,15 @@ function grow(variety: VarietyName, x: number, z: number, salt: number): Tree {
 const SLOTS: [number, number][] = [[.27, .27], [.73, .3], [.3, .73], [.72, .72]];
 
 /** Trees growing wild on an empty land tile at the given terrain level. */
-export function wildTrees(x: number, z: number, height: number, out: Tree[] = []): Tree[] {
-  if (height < 1 || height >= 30) return out;
+export function wildTreeCount(x: number, z: number, height: number): number {
+  if (height < 1 || height >= 30) return 0;
   const wood = woodland(x, z), roll = hash(x, z);
-  const count = wood > .7 ? 3 : wood > .6 ? 2 : wood > .48 ? (roll < .35 ? 1 : 0) : (roll < .05 ? 1 : 0);
+  return wood > .7 ? 3 : wood > .6 ? 2 : wood > .48 ? (roll < .35 ? 1 : 0) : (roll < .05 ? 1 : 0);
+}
+
+export function wildTrees(x: number, z: number, height: number, out: Tree[] = [], treeCount?: number): Tree[] {
+  if (height < 1 || height >= 30) return out;
+  const count = treeCount ?? wildTreeCount(x, z, height);
   if (!count) return out;
   if (count === 1) {
     const tx = x + .5 + (hash(x, z, 3) - .5) * .4, tz = z + .5 + (hash(x, z, 4) - .5) * .4;

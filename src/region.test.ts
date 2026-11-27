@@ -4,8 +4,10 @@ import { regionGeometry, RegionRenderer, detailedCity } from "./region.ts";
 import type { RegionTile, RegionView } from "./region.ts";
 import type { CityState } from "./types.ts";
 import { buildingModel } from "./buildings.ts";
-import { createSurface } from "./terrain.ts";
+import { createSurface, groundVariation } from "./terrain.ts";
 import { levelRectangle } from "./selection.ts";
+import { weatherStrengths } from "./weather.ts";
+import type { Weather } from "./types.ts";
 
 function tile(step: number, x = 0): RegionTile {
   const size = 20;
@@ -31,6 +33,24 @@ test("coarse terrain preserves fine border vertices and upward-facing triangles"
     for (let i = 0; i < normal.count; i++) assert.ok(normal.getY(i) > 0);
     geometry.dispose();
   }
+});
+
+test("flat land has a fixed, subtle shade for each world tile", () => {
+  const values = Array.from({ length: 100 }, (_, x) => groundVariation(x, 12));
+  assert.ok(values.every(value => value >= .94 && value <= 1.06));
+  assert.ok(new Set(values).size > 90);
+  assert.equal(groundVariation(-3, 12), groundVariation(-3, 12));
+  const flat = tile(1);
+  flat.edges.forEach(edge => edge.fill(1));
+  const geometry = regionGeometry(flat, 20);
+  const positions = geometry.getAttribute("position"), shades = geometry.getAttribute("shade");
+  const sample = (x: number) => {
+    for (let i = 0; i < positions.count; i++)
+      if (positions.getX(i) === x + .5 && positions.getZ(i) === .5) return shades.getX(i);
+    throw new Error("Missing terrain centre");
+  };
+  assert.notEqual(sample(0), sample(1));
+  geometry.dispose();
 });
 
 test("overview terrain uses the same amplified height as the detailed surface", () => {
@@ -63,6 +83,31 @@ test("region overview shows the focused district and evicts tiles outside the vi
   assert.equal(renderer.group.children[0]!.position.x, 0);
   renderer.dispose();
   assert.equal(renderer.group.children.length, 0);
+});
+
+test("weather tint reaches cached distant terrain and transitions back", () => {
+  const renderer = new RegionRenderer();
+  const view: RegionView = { size: 20, focus: [0, 0], detailed: [[0, 0]], explored: 2, inhabited: 1,
+    tiles: [tile(2), tile(10, 1)], fogNear: 100, fogFar: 200 };
+  renderer.update(view, false);
+  const far = renderer.group.children[1]!.children[0] as import("three").Mesh;
+  const colors = far.geometry.getAttribute("color");
+  const green = [colors.getX(0), colors.getY(0), colors.getZ(0)];
+  renderer.setWeather(1, 0);
+  assert.ok(colors.getX(0) > green[0]! && colors.getZ(0) > green[2]!);
+  renderer.setWeather(.5, 0);
+  assert.ok(colors.getX(0) < .83);
+  renderer.setWeather(0, 0);
+  assert.deepEqual([colors.getX(0), colors.getY(0), colors.getZ(0)], green);
+  renderer.setWeather(Number.NaN, Number.NaN);
+  assert.deepEqual([colors.getX(0), colors.getY(0), colors.getZ(0)], green);
+  renderer.dispose();
+});
+
+test("older weather responses cannot poison terrain colours", () => {
+  const oldResponse = { season: "winter", condition: "snow", happiness: -4, day: 1 } as Weather;
+  assert.deepEqual(weatherStrengths(oldResponse), { sun: 0, rain: 0, snow: 1 });
+  assert.deepEqual(weatherStrengths(undefined), { sun: 1, rain: 0, snow: 0 });
 });
 
 test("neighbour detail keeps local models identical when camera focus crosses a boundary", () => {

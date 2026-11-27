@@ -1,8 +1,9 @@
 export type Zone = "residential" | "commercial" | "industrial";
-export type Kind = Zone | "empty" | "road" | "power" | "park" | "powerline" | "waterworks" | "service";
+export type Kind = Zone | "empty" | "road" | "power" | "park" | "landfill" | "powerline" | "waterworks" | "service";
 export type Tool = Exclude<Kind, "empty"> | "bulldoze" | "inspect" | "terrain" | "raise" | "lower" | "level" | "pipe" | "remove_pipe";
-export type Overlay = "normal" | "power" | "access" | "zones" | "elevation" | "traffic" | "water" | "desirability" | "pollution";
+export type Overlay = "normal" | "power" | "access" | "zones" | "elevation" | "traffic" | "water" | "desirability" | "pollution" | "trash";
 export type Speed = 0 | "day" | 1 | 3;
+export interface Weather { season: "winter" | "spring" | "summer" | "autumn"; condition: "sun" | "rain" | "snow"; happiness: number; day: number; sun: number; rain: number; snow: number }
 export interface Cell { x: number; z: number }
 export interface Tile extends Cell {
   height: number;
@@ -21,6 +22,10 @@ export interface Tile extends Cell {
   pollution: number;
   /** Number of pollution-removing trees rooted on this square. */
   trees: number;
+  trash?: number;
+  rezoneKind?: Zone | undefined;
+  rezoneVariant?: string | undefined;
+  rezoneDue?: number | undefined;
   powerDemand: number;
   powerSupply: number;
   powerGrid: number | null;
@@ -93,6 +98,7 @@ interface CitySummary {
   size: number;
   seed: number;
   tick: number;
+  weather?: Weather;
   revision: number;
   speed: Speed;
   /** Minutes since the start of the current month (30 days). */
@@ -133,7 +139,8 @@ export interface RawCityState extends Omit<CitySummary, "trafficRevision" | "roa
   power_wind: number;
   power_lines: [number, number][];
   tiles: { height: number[]; kind: string; variant: string; level: string; powered: string; connected: string;
-    workers: number[]; residents: number[]; condition: number[]; traffic: number[]; pollution?: number[]; trees?: number[];
+    workers: number[]; residents: number[]; condition: number[]; traffic: number[]; pollution?: number[]; trees?: number[]; trash?: number[];
+    rezone_kind?: string; rezone_variant?: string; rezone_due?: number[];
     power_demand: number[]; power_supply: number[]; power_grid: number[]; battery_charge: number[]; installation_part?: number[] };
 }
 export interface UnchangedState { unchanged: true; session: string; revision: number; clock: number }
@@ -152,7 +159,7 @@ export interface TrafficData {
   route: string[];
 }
 const kindByCode: Record<string, Kind> = {
-  ".": "empty", "=": "road", r: "residential", c: "commercial", i: "industrial", p: "power", k: "park", l: "powerline", w: "waterworks", s: "service",
+  ".": "empty", "=": "road", r: "residential", c: "commercial", i: "industrial", p: "power", k: "park", d: "landfill", l: "powerline", w: "waterworks", s: "service",
 };
 export function decodeState(raw: RawCityState): CityState {
   const { terrain_revision, traffic_revision, road_capacity, avg_commute, power_wind, power_lines, tiles, ...summary } = raw;
@@ -172,6 +179,10 @@ export function decodeState(raw: RawCityState): CityState {
       workers: tiles.workers[i]!, residents: tiles.residents[i]!, condition: tiles.condition[i]!, traffic: tiles.traffic[i]!,
       pollution: tiles.pollution?.[i] ?? 0,
       trees: tiles.trees?.[i] ?? 0,
+      trash: tiles.trash?.[i] ?? 0,
+      rezoneKind: tiles.rezone_kind?.[i] && tiles.rezone_kind[i] !== "." ? kindByCode[tiles.rezone_kind[i]!] as Zone : undefined,
+      rezoneVariant: tiles.rezone_variant?.[i]?.replace(".", "") || undefined,
+      rezoneDue: tiles.rezone_due?.[i] || undefined,
       powerDemand: tiles.power_demand[i]!, powerSupply: tiles.power_supply[i]!,
       powerGrid: tiles.power_grid[i] === -1 ? null : tiles.power_grid[i]!,
       batteryCharge: tiles.battery_charge[i]!,
@@ -188,16 +199,16 @@ export const tools: { id: Tool; label: string; key: string; icon: string; cost: 
   { id: "power", label: "Power station", key: "6", icon: "P", cost: 900, hint: "Needs a connected road. Roads and adjacent lots share power; lines bridge gaps." },
   { id: "powerline", label: "Power lines", key: "L", icon: "↯", cost: 15, hint: "Drag a route, or place aligned pylons up to 8 tiles apart across open land, roads or water." },
   { id: "waterworks", label: "Water facility", key: "U", icon: "W", cost: 1000, hint: "Place a pump or tower. Connect its entrance to a road, power it, and pipe its northwest anchor. Choose rotation below." },
-  { id: "service", label: "Public services", key: "V", icon: "S", cost: 800, hint: "Place fire, police and education buildings beside roads. Their visible radius improves desirability while powered." },
   { id: "pipe", label: "Water pipes", key: "J", icon: "~", cost: 3, hint: "Drag underground pipes on dry land. Serve lots within two tiles; can coexist with roads and buildings." },
   { id: "remove_pipe", label: "Remove pipes", key: "K", icon: "x~", cost: 1, hint: "Remove underground pipes only. Surface bulldozing leaves pipes intact." },
+  { id: "service", label: "Public services", key: "V", icon: "S", cost: 800, hint: "Place fire, police, education or forester buildings beside roads. Services need power to operate." },
   { id: "park", label: "Park", key: "7", icon: "+", cost: 60, hint: "A little breathing room. Parks cost $8 per month to maintain." },
   { id: "bulldoze", label: "Bulldoze", key: "8", icon: "x", cost: 5, hint: "Remove development before replacing it. There are no refunds." },
   { id: "terrain", label: "Terrain", key: "9", icon: "△", cost: 20, hint: "Raise, lower, or level empty terrain. Nearby slopes adjust automatically." },
 ];
 export const colors: Record<Kind, string> = {
   empty: "#789c78", road: "#46535b", residential: "#6dc991",
-  commercial: "#72b7df", industrial: "#dfb85b", power: "#cb8370", park: "#8cbf64", powerline: "#c5b88a", waterworks: "#59bad3", service: "#907bc5",
+  commercial: "#72b7df", industrial: "#dfb85b", power: "#cb8370", park: "#8cbf64", landfill: "#8b795b", powerline: "#c5b88a", waterworks: "#59bad3", service: "#907bc5",
 };
 /** Zoning subtypes retain their familiar family colour while remaining legible
  * without opening the inspector. */
@@ -222,6 +233,7 @@ export const variants: Partial<Record<Kind | "terrain", Variant[]>> = {
     { id: "f", label: "Fire station", detail: "12-tile coverage · strongest for industry · $80/month", cost: 800 },
     { id: "p", label: "Police station", detail: "10-tile coverage · strongest for commerce · $90/month", cost: 900 },
     { id: "e", label: "School", detail: "10-tile catchment · strongest for homes · $100/month", cost: 1000 },
+    { id: "w", label: "Forester", detail: "8-tile planting radius · gradually grows woodland · $35/month", cost: 500 },
   ],
   waterworks: [
     { id: "p", label: "Groundwater pump", detail: "2 x 1 footprint / 1,200 m3 per day / 12 kW / $60 per month", cost: 1000 },
@@ -232,6 +244,9 @@ export const variants: Partial<Record<Kind | "terrain", Variant[]>> = {
     { id: "r", label: "Local road", detail: "400 capacity ? standard speed ? $2/month", cost: 12 },
     { id: "a", label: "Avenue", detail: "900 capacity ? faster travel ? $5/month", cost: 30 },
     { id: "e", label: "Express road", detail: "1,400 capacity ? fastest travel ? $8/month", cost: 50 },
+    { id: "h", label: "Highway", detail: "Three lanes each way across a three-tile-wide corridor. Drag a centre line; $85 per centre tile plus shoulders", cost: 85 },
+    { id: "m", label: "On/off ramp", detail: "Three-by-three ramp from a highway centre tile toward a local road. Choose direction below", cost: 45 },
+    { id: "x", label: "Highway junction", detail: "Nine-by-nine interchange joining crossing highways. Click its centre", cost: 100 },
   ],
   residential: [
     { id: "l", label: "Low density", detail: "Houses and terraces, up to level 2" },
@@ -247,6 +262,7 @@ export const variants: Partial<Record<Kind | "terrain", Variant[]>> = {
     { id: "m", label: "Manufacturing", detail: "Workshops to steel mills · 20 jobs per level, smoky" },
     { id: "t", label: "High tech", detail: "Clean labs and campuses · 14 jobs per level" },
     { id: "f", label: "Farming", detail: "Crops, barns and silos · 6 jobs per level, up to 3" },
+    { id: "landfill", label: "Landfill zone", detail: "Paint dump tiles beside a road. Each stores 300 trash units, collects waste and leaks pollution when filled. $3/month upkeep per tile", cost: 35 },
   ],
   power: [
     { id: "c", label: "Coal", detail: "800 kW steady output, $180/month", cost: 900 },
@@ -269,5 +285,13 @@ export const ROAD_TYPES: Record<string, { capacity: number; color: string }> = {
   r: { capacity: 400, color: "#46535b" },
   a: { capacity: 900, color: "#3e4854" },
   e: { capacity: 1400, color: "#303840" },
+  h: { capacity: 3200, color: "#303840" },
+  v: { capacity: 3200, color: "#303840" },
+  b: { capacity: 1, color: "#39434a" },
+  m: { capacity: 700, color: "#444d50" },
+  x: { capacity: 2800, color: "#353d46" },
+  j: { capacity: 800, color: "#353d46" },
+  c: { capacity: 1400, color: "#86b472" },
+  g: { capacity: 1, color: "#86b472" },
 };
 export const roadType = (tile: Pick<Tile, "variant">) => ROAD_TYPES[tile.variant] ?? ROAD_TYPES.r!;

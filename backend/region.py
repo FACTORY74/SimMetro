@@ -500,7 +500,7 @@ class World:
                           [(i / 2, SIZE) for i in range(SIZE * 2 + 1)],
                           [(0, i / 2) for i in range(SIZE * 2 + 1)])],
                       buildings=[[t.x, t.z, t.height, t.kind, t.level] for t in city.tiles
-                                 if t.level or t.kind in ("power", "park", "road", "waterworks", "service")] if city else [])
+                                 if t.level or t.kind in ("power", "park", "road", "waterworks", "service", "landfill")] if city else [])
         result["edges"] = self.terrain_edges(cx, cz)
         self.mesh_cache[key] = result
         if len(self.mesh_cache) > 256:
@@ -539,17 +539,20 @@ class World:
                 if key in self.high:
                     city = self.cities.get(key)
                     lots = [[t.x, t.z, t.kind, t.variant, t.level, t.condition, t.workers,
-                             t.powered, t.connected, t.residents, t.installation_part]
+                             t.powered, t.connected, t.residents, t.installation_part,
+                             t.rezone_kind, t.rezone_variant, t.rezone_due, t.trash]
                             for t in city.tiles if t.kind != "empty"] if city else []
                     # Rendering data does not allocate simulations for pristine neighbours.
                     detail = dict(seed=self.seed, desirability=city.desirability() if city else None, water=city.water_network.data() if city else None,
                                   heights=[t.height for t in city.tiles] if city else terrain(self.seed, *key, self.base, self.generator),
                                   lots=lots, pollution=[round(t.pollution, 2) for t in city.tiles] if city else None,
                                   trees=[t.trees for t in city.tiles] if city else None,
+                                  trash=[t.trash for t in city.tiles] if city else None,
                                   powerLines=city.grid.lines if city else [],
                                   edges=mesh["edges"],
                                   terrainRevision=city.terrain_revision if city else 0)
                     detail["stamp"] = self.render_id + ":" + str(hash((detail["terrainRevision"], tuple(tuple(lot) for lot in lots),
+                        tuple(detail["trees"]) if detail["trees"] else (),
                         tuple((f.id, f.rotation, round(f.stored, 2), city.water_network.facility_status[f.id]["reason"]) for f in city.facilities.values()) if city else (),
                         tuple(sorted(city.pipes)) if city else (),
                         tuple((i, r["score"]) for i, r in city.desirability_state.items()) if city else ())))
@@ -599,7 +602,6 @@ class World:
                 raise ValueError("Duplicate saved district.")
             city = City.restore(entry.get("state"))
             city.district = key
-            city._recalculate_trees()
             if city.seed != data["seed"]:
                 raise ValueError("District seed differs from region seed.")
             cities[key] = city

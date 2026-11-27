@@ -22,6 +22,17 @@ const SPEEDS: { speed: Speed; label: string; title: string }[] = [
   { speed: 1, label: "1×", title: "Fast: one month every 2 seconds" },
   { speed: 3, label: "3×", title: "Fastest: three months every 2 seconds" },
 ];
+const menuGroups = [
+  { id: "zoning", label: "Zoning", icon: "Z", summary: "Homes, shops, industry", tools: ["residential", "commercial", "industrial"] },
+  { id: "roads", label: "Roads", icon: "=", summary: "Streets, highways, ramps", tools: ["road"] },
+  { id: "power", label: "Power", icon: "P", summary: "Generation and lines", tools: ["power", "powerline"] },
+  { id: "water", label: "Water", icon: "W", summary: "Facilities and pipes", tools: ["waterworks", "pipe", "remove_pipe"] },
+  { id: "services", label: "Services", icon: "S", summary: "Civic buildings and parks", tools: ["service", "park"] },
+  { id: "terrain", label: "Terrain", icon: "△", summary: "Landscape and demolition", tools: ["terrain", "bulldoze"] },
+] as const;
+type MenuGroup = typeof menuGroups[number]["id"];
+const menuForTool = (tool: Tool): MenuGroup | null =>
+  menuGroups.find(group => group.tools.some(item => item === tool))?.id ?? null;
 /** Minute of the day as HH:MM. */
 const time = (minute: number) => {
   const m = ((Math.round(minute) % 1440) + 1440) % 1440;
@@ -128,6 +139,7 @@ function App() {
   const rotationRef = useRef(0);
   rotationRef.current = facilityRotation;
   const [tool, setTool] = useState<Tool>("inspect");
+  const [openMenu, setOpenMenu] = useState<MenuGroup | null>(null);
   const [overlay, setOverlay] = useState<Overlay>("normal");
   const [showTileBoundaries, setShowTileBoundaries] = useState(false);
   const [hover, setHover] = useState<Cell | null>(null);
@@ -235,10 +247,15 @@ function App() {
         const chosen = currentTool.current;
         if (chosen === "inspect") return;
         void action(async () => {
-          const operation = chosen === "terrain" ? currentChoice.current.terrain ?? "raise" : chosen;
-          const result = await request<{ cost: number; state: RawCityState }>("build", { tool: operation, cells, variant: chosen === "terrain" ? null : currentChoice.current[chosen] ?? null, district: district.current, rotation: rotationRef.current });
-          accept(decodeState(result.state));
-          notify(result.cost ? `Construction complete · ${dollars(result.cost)}` : "Nothing changed.");
+          const operation = chosen === "terrain" ? currentChoice.current.terrain ?? "raise" :
+            chosen === "industrial" && currentChoice.current.industrial === "landfill" ? "landfill" : chosen;
+          const result = await request<{ cost: number; state: RawCityState }>("build", { tool: operation, cells, variant: chosen === "terrain" || operation === "landfill" ? null : currentChoice.current[chosen] ?? null, district: district.current, rotation: rotationRef.current });
+          const next = decodeState(result.state);
+          accept(next);
+          const rezoning = ["residential", "commercial", "industrial"].includes(operation) &&
+            cells.some(cell => next.tiles[cell.z * next.size + cell.x]?.rezoneKind);
+          notify(rezoning ? `Rezoning scheduled · ${dollars(result.cost)} · buildings transition within a year` :
+            result.cost ? `Construction complete · ${dollars(result.cost)}` : "Nothing changed.");
         });
       }, setHover, setSelected);
       world.current.onTick = (vehicles, clock, queued, perCar, fps) => {
@@ -264,10 +281,14 @@ function App() {
     }, data => { setTraffic(data); world.current?.setTraffic(data); });
   }, [trafficRevision, session]);
   useEffect(() => {
-    world.current?.setTool(tool === "terrain" ? ((choice.terrain as Tool | undefined) ?? "raise") : tool);
+    world.current?.setTool(tool === "terrain" ? ((choice.terrain as Tool | undefined) ?? "raise") :
+      tool === "industrial" && choice.industrial === "landfill" ? "landfill" : tool);
     if (tool === "pipe" || tool === "remove_pipe") setOverlay("water");
-  }, [tool, choice.terrain]);
-  useEffect(() => { world.current?.setFacilityPlacement(choice.waterworks ?? "p", facilityRotation, choice.power ?? "c"); }, [choice.waterworks, choice.power, facilityRotation]);
+  }, [tool, choice.terrain, choice.industrial]);
+  useEffect(() => {
+    world.current?.setFacilityPlacement(choice.waterworks ?? "p", facilityRotation, choice.power ?? "c");
+    world.current?.setRoadPlacement(choice.road ?? "r", facilityRotation);
+  }, [choice.waterworks, choice.power, choice.road, facilityRotation]);
   useEffect(() => { world.current?.setOverlay(overlay); }, [overlay]);
   useEffect(() => { world.current?.setTileBoundaries(showTileBoundaries); }, [showTileBoundaries]);
   useEffect(() => {
@@ -281,8 +302,15 @@ function App() {
       if (event.target instanceof HTMLElement &&
           ["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(event.target.tagName)) return;
       if (powerReport) return;
+      if (event.key === "Escape") { setOpenMenu(null); return; }
+      if (event.key.toLowerCase() === "g" && !showcase) {
+        setChoice(c => ({ ...c, industrial: "landfill" }));
+        setTool("industrial");
+        setOpenMenu("zoning");
+        return;
+      }
       const chosen = tools.find(t => t.key.toLowerCase() === event.key.toLowerCase());
-      if (chosen && !showcase) setTool(chosen.id);
+      if (chosen && !showcase) { setTool(chosen.id); setOpenMenu(menuForTool(chosen.id)); }
       if (event.code === "Space" && city) {
         event.preventDefault();
         void action(async () => accept(await requestState("speed", { speed: city.speed ? 0 : lastSpeed.current })));
@@ -293,6 +321,7 @@ function App() {
   }, [city, action, accept, showcase, powerReport]);
 
   const active = tools.find(t => t.id === tool)!;
+  const selectedMenu = menuGroups.find(group => group.id === openMenu);
   const options = variants[tool as Kind | "terrain"];
   const option = options?.find(v => v.id === choice[tool]);
   const tile = city && selected ? city.tiles[selected.z * city.size + selected.x] : null;
@@ -345,26 +374,50 @@ function App() {
 
     <aside className="tool-panel panel">
       <div className="section-label">BUILD YOUR CITY</div>
-      <div className="tools">{tools.map(t => <button key={t.id} className={`tool ${tool === t.id ? "active" : ""}`}
-        onClick={() => setTool(t.id)} aria-label={t.label} aria-pressed={tool === t.id} title={`${t.label} (${t.key})`}>
-        <span className={`tool-icon ${t.id}`}>{t.icon}</span>
-        <span className="tool-label">{t.label}<small>{t.cost ? `${dollars(t.cost)} / ${t.id === "waterworks" ? "facility" : "tile"}` : "Explore your city"}</small></span>
-        <kbd>{t.key}</kbd>
-      </button>)}</div>
-      {options && <div className="subtypes" role="radiogroup" aria-label={`${active.label} type`}>
-        <div className="section-label">{active.label.toUpperCase()} TYPE</div>
-        {options.map(v => <button key={v.id} role="radio" aria-checked={choice[tool] === v.id}
-          className={`subtype ${choice[tool] === v.id ? "active" : ""}`} title={v.detail}
-          onClick={() => setChoice(c => ({ ...c, [tool]: v.id }))}>
-          {v.label}{v.cost ? <small>{dollars(v.cost)}</small> : null}
+      <div className="tools">
+        <button className={`tool ${tool === "inspect" && !openMenu ? "active" : ""}`}
+          onClick={() => { setTool("inspect"); setOpenMenu(null); }} aria-label="Inspect" aria-pressed={tool === "inspect" && !openMenu} title="Inspect (1)">
+          <span className="tool-icon inspect">i</span><span className="tool-label">Inspect<small>Explore your city</small></span><kbd>1</kbd>
+        </button>
+        {menuGroups.map(group => <button key={group.id} className={`tool ${openMenu === group.id || !openMenu && menuForTool(tool) === group.id ? "active" : ""}`}
+          onClick={() => {
+            if (openMenu !== group.id && menuForTool(tool) !== group.id) setTool("inspect");
+            setOpenMenu(current => current === group.id ? null : group.id);
+          }}
+          aria-label={`${group.label} tools`} aria-expanded={openMenu === group.id} aria-controls="tool-subpanel" title={group.label}>
+          <span className={`tool-icon ${group.id}`}>{group.icon}</span>
+          <span className="tool-label">{group.label}<small>{group.summary}</small></span><span className="menu-chevron">›</span>
         </button>)}
-      </div>}
-      {tool === "waterworks" && <div className="subtypes"><label>Entrance orientation
-        <select aria-label="Facility rotation" value={facilityRotation} onChange={e => setFacilityRotation(Number(e.target.value))}>
-          <option value="0">West</option><option value="1">North</option><option value="2">East</option><option value="3">South</option>
-        </select></label><p className="muted">Yellow preview marks the road entrance; green means connected. Cost is per facility.</p></div>}
+      </div>
       <div className="tool-footer"><span className="tiny-dot" /> Original procedural models<br /><span className="muted">No textures. Just possibilities.</span></div>
     </aside>
+    {selectedMenu && <aside className="tool-subpanel panel" id="tool-subpanel" aria-label={`${selectedMenu.label} options`}>
+      <div className="tool-menu-header"><strong>{selectedMenu.label}</strong><button onClick={() => setOpenMenu(null)} aria-label="Close tool options">×</button></div>
+      {selectedMenu.tools.map(item => {
+        const info = tools.find(t => t.id === item)!;
+        const choices = variants[item as Kind | "terrain"];
+        return <section className="tool-menu-section" key={item}>
+          <h3>{info.label}<kbd>{info.key}</kbd></h3>
+          {choices ? choices.map(v => <button key={v.id} className={`tool-menu-option ${tool === item && choice[item] === v.id ? "active" : ""}`}
+            onClick={() => { setChoice(c => ({ ...c, [item]: v.id })); setTool(item); }}
+            aria-pressed={tool === item && choice[item] === v.id} title={v.detail}>
+            <span>{v.label}{v.id === "landfill" && <kbd>G</kbd>}</span><small>{v.detail}</small><em>{dollars(v.cost ?? info.cost)}</em>
+          </button>) : <button className={`tool-menu-option ${tool === item ? "active" : ""}`}
+            onClick={() => setTool(item)} aria-pressed={tool === item} title={info.hint}>
+            <span>{info.label}</span><small>{info.hint}</small><em>{dollars(info.cost)}</em>
+          </button>}
+        </section>;
+      })}
+      {tool === "waterworks" && openMenu === "water" && <label className="tool-menu-setting">Entrance orientation
+        <select aria-label="Facility rotation" value={facilityRotation} onChange={e => setFacilityRotation(Number(e.target.value))}>
+          <option value="0">West</option><option value="1">North</option><option value="2">East</option><option value="3">South</option>
+        </select></label>}
+      {tool === "road" && openMenu === "roads" && (choice.road === "h" || choice.road === "m") && <label className="tool-menu-setting">{choice.road === "h" ? "Single-section direction" : "Ramp direction"}
+        <select aria-label="Highway direction" value={choice.road === "h" ? facilityRotation % 2 : facilityRotation} onChange={e => setFacilityRotation(Number(e.target.value))}>
+          {choice.road === "h" ? <><option value="0">East–west</option><option value="1">North–south</option></> :
+            <><option value="0">North</option><option value="1">East</option><option value="2">South</option><option value="3">West</option></>}
+        </select></label>}
+    </aside>}
 
     <aside className="dashboard">
       <section className="panel region-status">
@@ -440,12 +493,12 @@ function App() {
         <div className="section-label">MAP LAYERS</div>
         <select aria-label="Map layer" value={overlay} onChange={event => setOverlay(event.target.value as Overlay)}>
           <option value="normal">City view</option><option value="zones">Land use</option>
-          <option value="desirability">Desirability</option><option value="pollution">Pollution</option><option value="water">Water pipes &amp; supply</option><option value="power">Power grid</option><option value="access">Road access</option>
+          <option value="desirability">Desirability</option><option value="pollution">Pollution</option><option value="trash">Trash &amp; landfill</option><option value="water">Water pipes &amp; supply</option><option value="power">Power grid</option><option value="access">Road access</option>
           <option value="elevation">Terrain elevation</option><option value="traffic">Traffic volume</option>
         </select>
         <label className="layer-toggle"><input type="checkbox" checked={showTileBoundaries}
           onChange={event => setShowTileBoundaries(event.target.checked)} /> Show simulation tile boundaries</label>
-        {overlay !== "normal" && <p className="layer-help">{overlay === "pollution" ? "Green: clean / yellow: elevated / orange: unhealthy / red and purple: severe. Buildings are ghosted so the concentration field remains visible." : overlay === "desirability" ? "Red: below 40 / yellow: 40-49 / green: 50-69 / teal: 70+. Grey: not zoned. Suitability only; essential services and demand still apply." : overlay === "water" ? "Cyan: underground pipe / green: supplied / yellow: partial / red: shortage / grey: no consumer. Pipe colour takes precedence; inspect for supply." : overlay === "zones" ? "Green: homes · Blue: shops · Gold: industry" :
+        {overlay !== "normal" && <p className="layer-help">{overlay === "trash" ? "Green: clear / yellow: growing backlog / red: severe / purple: full landfill. Road-connected landfill tiles collect trash." : overlay === "pollution" ? "Green: clean / yellow: elevated / orange: unhealthy / red and purple: severe. Buildings are ghosted so the concentration field remains visible." : overlay === "desirability" ? "Red: below 40 / yellow: 40-49 / green: 50-69 / teal: 70+. Grey: not zoned. Suitability only; essential services and demand still apply." : overlay === "water" ? "Cyan: underground pipe / green: supplied / yellow: partial / red: shortage / grey: no consumer. Pipe colour takes precedence; inspect for supply." : overlay === "zones" ? "Green: homes · Blue: shops · Gold: industry" :
           overlay === "elevation" ? "Blue: below sea level · Sand: shore · Green to white: higher ground" :
           overlay === "traffic" ? "Daily peak: green quiet / yellow busy / red over each road type's capacity" :
           "Green: served · Red: not served"}</p>}
@@ -476,13 +529,17 @@ function App() {
       <p>{tile.level ? `Development level ${tile.level} / ${MAX_LEVEL[`${tile.kind[0]}${subtype(tile)}`] ?? 4}` : "No developed building"}</p>
       {tile.kind === "residential" && <p>Residents: {tile.residents} / {tile.level * 24}</p>}
       {building && <p><strong>{building.name}</strong></p>}
+      {tile.rezoneKind && <p className="positive">Rezoning to {variants[tile.rezoneKind]?.find(v => v.id === tile.rezoneVariant)?.label ?? tile.rezoneKind} by {MONTHS[(tile.rezoneDue ?? 0) % 12]} {2000 + Math.floor((tile.rezoneDue ?? 0) / 12)}. Existing building remains until conversion.</p>}
       {business && tile.level > 0 && <>
         <p>Staff: {tile.workers} / {tile.level * jobsPerLevel}</p>
-        <p className={tile.condition < 60 ? "negative" : ""}>Condition: {tile.condition}% · {tile.condition <= 20 ? "Derelict" : tile.condition < 60 ? "Disrepair" : "Maintained"}</p>
         <p>80% staffing maintains and repairs this building.</p>
       </>}
+      {tile.kind !== "empty" && tile.kind !== "road" && tile.kind !== "landfill" &&
+        <p className={tile.condition < 60 ? "negative" : ""}>Condition: {tile.condition}% · {tile.condition <= 20 ? "Derelict" : tile.condition < 60 ? "Disrepair" : "Maintained"}</p>}
       {tile.kind === "road" && city && <p>Peak traffic: {number(tile.traffic)} cars · {Math.round(tile.traffic / roadType(tile).capacity * 100)}% of capacity</p>}
       <p>Pollution: {tile.pollution.toFixed(1)} / 100</p>
+      {tile.kind === "landfill" ? <p>Trash stored: {tile.trash ?? 0} / 300 · {tile.connected ? "Collecting by road" : "No road connection"}</p> :
+        tile.trash ? <p className="negative">Uncollected trash: {tile.trash} · damaging this building</p> : null}
       <p>Trees: {tile.trees} · enhanced pollution removal</p>
       {tile.kind !== "empty" && <>
         <p>Electrical grid: {tile.powerGrid === null ? "Disconnected" : `#${tile.powerGrid + 1}`}</p>
@@ -498,14 +555,14 @@ function App() {
 
     <div className="map-caption"><span className="compass">N ↑</span><span>NEW HARBOURSIDE<br /><small>{city?.size ?? 100} × {city?.size ?? 100} · COASTAL REGION</small></span></div>
     <footer className="bottom-bar panel">
-      <div className="active-tool"><span className={`tool-icon ${active.id}`}>{active.icon}</span><div><strong>{active.label}{option ? ` · ${option.label}` : ""}</strong><p>{option ? `${option.detail}. ` : ""}{active.hint}</p></div></div>
+      <div className="active-tool"><span className={`tool-icon ${active.id}`}>{active.icon}</span><div><strong>{active.label}{option ? ` · ${option.label}` : ""}</strong><p>{option ? `${option.detail}. ` : ""}{tool === "industrial" && choice.industrial === "landfill" || tool === "road" && ["h", "m", "x"].includes(choice.road ?? "") ? "" : active.hint}</p></div></div>
       <div className="performance-metrics" aria-label="Live performance">
         <span title="Rendered frames per second"><strong>{Math.round(performanceMetrics.fps)}</strong><small>FPS</small></span>
         <span title="Authoritative simulation updates per second"><strong>{performanceMetrics.updatesPerSecond.toFixed(1)}</strong><small>UPS</small></span>
         <span title="Time spent on the latest simulation update"><strong>{performanceMetrics.simulationMs.toFixed(1)}</strong><small>SIM ms</small></span>
         <span title="Latest complete region response time"><strong>{Math.round(performanceMetrics.latencyMs)}</strong><small>PING ms</small></span>
       </div>
-      <div className="time-controls"><span className="date">{date}<small>Day {day} · {time(live.clock)}</small></span><div className="speed-buttons">
+      <div className="time-controls"><span className="date">{date}<small>Day {city?.weather?.day ?? day} · {time(live.clock)}{city?.weather ? ` · ${city.weather.season} · ${city.weather.condition} (${city.weather.happiness > 0 ? "+" : ""}${city.weather.happiness} mood)` : ""}</small></span><div className="speed-buttons">
         {SPEEDS.map(({ speed, label, title }) => <button key={speed} aria-label={title} title={title}
           style={speed === "day" ? { width: 58 } : undefined}
           aria-pressed={city?.speed === speed} className={city?.speed === speed ? "selected" : ""}

@@ -3,13 +3,14 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { CAMERA_OFFSET, createCityCamera, updateCityCameraDepth } from "./camera";
-import { LEVEL_HEIGHT, MIN_LEVEL, WATER_Y, TERRAIN_COLORS, createSurface, groundY, pickCell, surfaceY, writeVehicleTransform } from "./terrain";
+import { LEVEL_HEIGHT, MIN_LEVEL, WATER_Y, TERRAIN_COLORS, createSurface, groundVariation, groundY, pickCell, surfaceY, writeVehicleTransform } from "./terrain";
 import type { Surface } from "./terrain";
 import { colors, roadType, subtype, zoneColor } from "./types";
 import { POWER_WIRE_HEIGHT, ROOMS, WIND_ROTOR, buildingModel, buildingModelLod, distanceLod, powerWireControlY, visualPowerLines, windowLit, type BuildingLod, type WindowUse } from "./buildings";
 import { DAY, LANE, TrafficSim, VehicleKind, buildFleet, isJunction, roadSides } from "./traffic";
 import type { Placement } from "./traffic";
 import { CROWN_COUNT, SKY_AXIS, hash, parkTrees, skyAngle, starField, sunDirection, wildTrees } from "./nature";
+import { weatherStrengths } from "./weather";
 import type { Tree } from "./nature";
 import type { Cell, CityState, Overlay, Speed, Tile, Tool, TrafficData } from "./types";
 import { RegionRenderer, detailedCity } from "./region";
@@ -55,6 +56,9 @@ const trafficRamp: [number, THREE.Color][] = ([
 ] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
 const pollutionRamp: [number, THREE.Color][] = ([
   [0, "#67b96f"], [8, "#a9c95b"], [20, "#e2c84e"], [40, "#e58a3f"], [65, "#d54f3f"], [100, "#7d365c"],
+] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
+const trashRamp: [number, THREE.Color][] = ([
+  [0, "#72b97a"], [10, "#e4c55a"], [50, "#e58a3f"], [150, "#ce5542"], [300, "#703e69"],
 ] as [number, string][]).map(([h, c]) => [h, new THREE.Color(c)]);
 const MUTED = new THREE.Color("#9aa69f"), PALE = new THREE.Color("#d9ddd8");
 const WHITE = new THREE.Color("#ffffff"), LOT_TINT = new THREE.Color("#c9d6c2");
@@ -153,6 +157,7 @@ export class CityWorld {
   private readonly box = new THREE.BoxGeometry(1, 1, 1);
   private readonly materials: THREE.Material[] = [];
   private readonly terrain: THREE.Mesh;
+  private readonly precipitation: THREE.Points;
   private surface: Surface | null = null;
   private buildings: THREE.InstancedMesh;
   private cylinders: THREE.InstancedMesh;
@@ -166,6 +171,8 @@ export class CityWorld {
   private readonly keys = new Set<string>();
   private readonly resize: ResizeObserver;
   private city: CityState | null = null;
+  private visualWeather = { sun: 1, rain: 0, snow: 0 };
+  private weatherPaintAt = 0;
   private terrainKey = "";
   private tool: Tool = "inspect";
   private overlay: Overlay = "normal";
@@ -214,6 +221,9 @@ export class CityWorld {
   private sim: TrafficSim | null = null;
   private markings: THREE.InstancedMesh;
   private sidewalks: THREE.InstancedMesh;
+  private readonly junctionCurves = new THREE.Group();
+  private readonly junctionRoadMaterial = new THREE.MeshLambertMaterial({ color: "#3d474b", side: THREE.DoubleSide });
+  private readonly junctionLineMaterial = new THREE.LineDashedMaterial({ color: "#d3d7ce", dashSize: .24, gapSize: .28 });
   private markingsKey = "";
   private junctions = new Set<number>();
   private traffic: TrafficData | null = null;
@@ -309,6 +319,13 @@ export class CityWorld {
     this.terrain.receiveShadow = true;
     this.terrain.castShadow = true;
     this.detail.add(this.terrain);
+    const weatherGeometry = new THREE.BufferGeometry();
+    weatherGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(600 * 3), 3));
+    const weatherMaterial = new THREE.PointsMaterial({ color: "#a8c9e9", size: .12, transparent: true, opacity: .75, depthWrite: false });
+    this.materials.push(weatherMaterial);
+    this.precipitation = new THREE.Points(weatherGeometry, weatherMaterial);
+    this.precipitation.frustumCulled = false;
+    this.scene.add(this.precipitation);
     this.buildings = instanced(this.box, 1, material({}));
     this.cylinders = instanced(new THREE.CylinderGeometry(.5, .5, 1, 12), 1, material({ flatShading: true }));
     this.serviceRings = instanced(new THREE.RingGeometry(.965, 1, 64).rotateX(-Math.PI / 2), 1,
@@ -384,7 +401,7 @@ export class CityWorld {
       instanced(new THREE.CylinderGeometry(.5, .6, 1, 5).translate(0, .5, 0), 1, bark, true, false),
       instanced(new THREE.CylinderGeometry(.5, .6, 1, 3).translate(0, .5, 0), 1, bark, false, false),
     );
-    this.preview = instanced(this.box, MAX_STROKE, material({ transparent: true, opacity: .6, depthWrite: false }), false, false);
+    this.preview = instanced(this.box, MAX_STROKE * 3, material({ transparent: true, opacity: .6, depthWrite: false }), false, false);
     // A small car built along +x: body plus a narrower cabin, merged into one instanced geometry.
     const car = mergeGeometries([
       new THREE.BoxGeometry(.3, .07, .15).translate(0, .075, 0),
@@ -446,6 +463,8 @@ export class CityWorld {
     this.spills.count = 0;
     this.beams.renderOrder = 2;
     this.markings = instanced(this.box, 1, material({ color: "#eef0ea" }), false, true);
+    this.materials.push(this.junctionRoadMaterial, this.junctionLineMaterial);
+    this.detail.add(this.junctionCurves);
     this.sidewalks = instanced(this.box, 1, material({}), false, true);
     const glass = material({});
     glass.onBeforeCompile = shader => {
@@ -513,6 +532,8 @@ export class CityWorld {
   }
 
   update(city: CityState) {
+    if (!this.city || Object.values(this.visualWeather).some(value => !Number.isFinite(value)))
+      this.visualWeather = weatherStrengths(city.weather);
     const resized = this.city?.size !== city.size;
     const switched = this.city && (this.city.district[0] !== city.district[0] || this.city.district[1] !== city.district[1]);
     if (switched && this.city && !this.shared) {
@@ -529,6 +550,8 @@ export class CityWorld {
       this.scheduled = "";
     }
     this.city = city;
+    this.regionRenderer.setWeather(this.visualWeather.snow,
+      city.weather?.season === "summer" ? this.visualWeather.sun : city.weather?.season === "autumn" ? .4 : 0);
     if (resized && !this.shared) {
       const centre = city.size / 2;
       this.controls.target.set(centre, 0, centre);
@@ -551,7 +574,14 @@ export class CityWorld {
 
   private facilityVariant = "p";
   private powerVariant = "c";
+  private roadVariant = "r";
+  private roadRotation = 0;
   private facilityRotation = 0;
+  setRoadPlacement(variant: string, rotation: number) {
+    this.roadVariant = variant;
+    this.roadRotation = rotation;
+    this.refreshPreview();
+  }
   setFacilityPlacement(variant: string, rotation: number, powerVariant = this.powerVariant) {
     this.facilityVariant = variant;
     this.facilityRotation = rotation;
@@ -635,11 +665,12 @@ export class CityWorld {
 
   setOverlay(overlay: Overlay) {
     this.overlay = overlay;
+    this.junctionCurves.visible = overlay === "normal";
     if (this.city && this.detailed) {
       this.paintTerrain(this.city);
       this.buildDevelopment(this.city);
     }
-    const ghosted = overlay === "desirability" || overlay === "pollution";
+    const ghosted = overlay === "desirability" || overlay === "pollution" || overlay === "trash";
     this.setBuildingsGhosted(ghosted);
     this.regionRenderer.setBuildingsGhosted(ghosted);
     for (const neighbour of this.neighbours.values()) neighbour.world.setOverlay(overlay);
@@ -681,7 +712,7 @@ export class CityWorld {
     const key = `${traffic.revision}:${this.markingsKey}`;
     if (key === this.scheduled) return;
     this.scheduled = key;
-    const sim = new TrafficSim(buildFleet(traffic, tile => city.tiles[tile]?.kind === "road"));
+    const sim = new TrafficSim(buildFleet(traffic, tile => city.tiles[tile]?.kind === "road" && !["b", "g"].includes(city.tiles[tile]?.variant ?? "")));
     // Keep cars that are mid-journey when only the plan changes, by restarting from the same clock.
     if (this.sim) sim.reset(this.sim.time);
     this.sim = sim;
@@ -698,12 +729,24 @@ export class CityWorld {
     const key = `${this.terrainKey}:${roads}:${digest}`;
     if (key === this.markingsKey) return;
     this.markingsKey = key;
-    const size = city.size, isRoad = (tile: number) => city.tiles[tile]?.kind === "road";
+    const size = city.size, isRoad = (tile: number) => city.tiles[tile]?.kind === "road" && !["b", "g"].includes(city.tiles[tile]?.variant ?? "");
     const marks: [number, number, number, number, number][] = [];  // centre x, z, direction x, z, length
     this.junctions.clear();
     city.tiles.forEach((tile, i) => {
       if (tile.kind !== "road") return;
       const mask = roadSides(i, size, isRoad), cx = tile.x + .5, cz = tile.z + .5;
+      if (["b", "g", "c", "j"].includes(tile.variant)) return;
+      if (tile.variant === "h" || tile.variant === "v" || tile.variant === "x") {
+        const axes = tile.variant === "h" ? [true] : tile.variant === "v" ? [false] : [true, false];
+        for (const eastWest of axes) {
+          if (tile.variant === "x" && !(mask & (eastWest ? 1 << 1 | 1 << 3 : 1 << 0 | 1 << 2))) continue;
+          for (const side of [-1, 1]) for (const laneEdge of [.26, .64, 1.02, 1.4]) {
+            const offset = side * laneEdge;
+            marks.push([cx + (eastWest ? 0 : offset), cz + (eastWest ? offset : 0), eastWest ? 1 : 0, eastWest ? 0 : 1, .68]);
+          }
+        }
+        return;
+      }
       const junction = isJunction(mask);
       if (junction) this.junctions.add(i);
       for (let side = 0; side < 4; side++) {
@@ -731,7 +774,51 @@ export class CityWorld {
     dummy.rotation.set(0, 0, 0);
     this.markings.count = marks.length;
     this.markings.instanceMatrix.needsUpdate = true;
+    this.buildJunctionCurves(city);
     this.paintTerrain(city);
+  }
+
+  /** Flat, curved slip lanes over grassy interchange corners. */
+  private buildJunctionCurves(city: CityState) {
+    const surface = this.surface;
+    if (!surface) return;
+    for (const child of [...this.junctionCurves.children]) {
+      this.junctionCurves.remove(child);
+      if (child instanceof THREE.Mesh || child instanceof THREE.Line) child.geometry.dispose();
+    }
+    for (const tile of city.tiles) {
+      if (tile.kind !== "road" || tile.variant !== "j") continue;
+      const cx = tile.x + .5, cz = tile.z + .5;
+      for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+        const offsets = [[0, 3 * sz], [sx, 3 * sz], [2 * sx, 3 * sz], [3 * sx, 3 * sz],
+          [3 * sx, 2 * sz], [3 * sx, sz], [3 * sx, 0]] as const;
+        const curve = new THREE.CatmullRomCurve3(offsets.map(([dx, dz]) => new THREE.Vector3(cx + dx, 0, cz + dz)), false, "centripetal");
+        const positions: number[] = [], indices: number[] = [], stripe: THREE.Vector3[] = [];
+        const steps = 32, halfWidth = .43;
+        for (let step = 0; step <= steps; step++) {
+          const t = step / steps, point = curve.getPoint(t), tangent = curve.getTangent(t);
+          const length = Math.hypot(tangent.x, tangent.z) || 1;
+          const sideX = -tangent.z / length, sideZ = tangent.x / length;
+          for (const sign of [-1, 1]) {
+            const x = point.x + sideX * halfWidth * sign, z = point.z + sideZ * halfWidth * sign;
+            positions.push(x, surface.groundAt(x, z) + .026, z);
+          }
+          stripe.push(new THREE.Vector3(point.x, surface.groundAt(point.x, point.z) + .042, point.z));
+          if (step < steps) {
+            const i = step * 2;
+            indices.push(i, i + 1, i + 2, i + 1, i + 3, i + 2);
+          }
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+        this.junctionCurves.add(new THREE.Mesh(geometry, this.junctionRoadMaterial));
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(stripe), this.junctionLineMaterial);
+        line.computeLineDistances();
+        this.junctionCurves.add(line);
+      }
+    }
   }
 
   /** Build the fast-forward traffic diagram. Each ordinary road gets a raised
@@ -742,15 +829,15 @@ export class CityWorld {
     if (!surface) return;
     let digest = 0, roads = 0;
     city.tiles.forEach((tile, index) => {
-      if (tile.kind !== "road") return;
+      if (tile.kind !== "road" || ["b", "g"].includes(tile.variant)) return;
       roads++;
-      digest = (Math.imul(digest, 31) + index + Math.round(tile.traffic * 10)) | 0;
+      digest = (Math.imul(digest, 31) + index + Math.round(tile.traffic * 10) + (tile.variant || "r").charCodeAt(0)) | 0;
     });
     const key = `${this.terrainKey}:${roads}:${digest}`;
     if (key === this.fastTrafficKey) return;
     this.fastTrafficKey = key;
     const size = city.size, parts: THREE.BufferGeometry[] = [];
-    const isRoad = (i: number) => city.tiles[i]?.kind === "road";
+    const isRoad = (i: number) => city.tiles[i]?.kind === "road" && !["b", "g"].includes(city.tiles[i]?.variant ?? "");
     const directions = [[0, -.5], [.5, 0], [0, .5], [-.5, 0]] as const;
     const point = (x: number, z: number) => new THREE.Vector3(x, 0, z);
     const followSurface = (path: THREE.Curve<THREE.Vector3>) => new class extends THREE.Curve<THREE.Vector3> {
@@ -762,7 +849,7 @@ export class CityWorld {
       }
     }();
     city.tiles.forEach((tile, index) => {
-      if (tile.kind !== "road") return;
+      if (tile.kind !== "road" || ["b", "g"].includes(tile.variant)) return;
       const sides = directions.map((_, side) => side).filter(side => roadSides(index, size, isRoad) & 1 << side);
       if (!sides.length) return;
       const centre = point(tile.x + .5, tile.z + .5);
@@ -804,6 +891,14 @@ export class CityWorld {
     const mesh = this.vehicles, matrix = mesh.instanceMatrix.array as Float32Array, p = this.placement;
     sim.cars.forEach((car, i) => {
       sim.place(car, size, p);
+      const roadTile = this.city?.tiles[car.route.tiles[car.stage]!];
+      const move = car.route.moves[car.stage]!;
+      const straight = (move & 3) === ((move >> 2) + 2) % 4;
+      if (roadTile?.kind === "road" && (roadTile.variant === "h" || roadTile.variant === "v" || roadTile.variant === "x" && straight)) {
+        const offset = (.43 + (car.id % 3) * .38) - LANE;
+        p.x -= p.dz * offset;
+        p.z += p.dx * offset;
+      }
       const kind = car.driver.kind, truck = kind === VehicleKind.Truck;
       const long = truck ? 1.7 : 1, tall = truck ? 1.5 : 1;
       writeVehicleTransform(surface, p.x, p.z, p.dx, p.dz, long, tall, matrix, i * 16);
@@ -847,6 +942,14 @@ export class CityWorld {
     const sun = sunDirection(minute, this.sunDirection);
     const height = THREE.MathUtils.smoothstep(sun.y, -.02, .14);
     this.sun.intensity = height * 2.3;
+    const cloud = this.visualWeather.rain + this.visualWeather.snow;
+    if (cloud > .001) {
+      this.sun.intensity *= 1 - .62 * this.visualWeather.rain - .42 * this.visualWeather.snow;
+      this.hemisphere.intensity *= 1 - .15 * cloud;
+      this.sky.lerp(new THREE.Color("#8798a2"), daylight * .42 * cloud);
+      (this.scene.background as THREE.Color).copy(this.sky);
+      (this.scene.fog as THREE.Fog).color.copy(this.sky);
+    }
     this.sun.color.copy(SUN_LOW).lerp(SUN_HIGH, THREE.MathUtils.smoothstep(sun.y, 0, .45));
     // The shadow camera follows the view, sized to what the camera can see.
     const target = this.controls.target;
@@ -912,6 +1015,7 @@ export class CityWorld {
     }
     this.scene.traverse(object => {
       if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) object.geometry.dispose();
+      if (object instanceof THREE.Points) object.geometry.dispose();
       if (object instanceof THREE.InstancedMesh) object.dispose();
     });
     this.materials.forEach(m => m.dispose());
@@ -977,6 +1081,8 @@ export class CityWorld {
         return c.set("#647574");
       case "pollution":
         return ramp(pollutionRamp, tile.pollution, c);
+      case "trash":
+        return ramp(trashRamp, tile.trash ?? 0, c);
       case "water":
         return c.set(tile.pipe ? "#20d6ed" : "#647574");
       case "elevation":
@@ -991,7 +1097,13 @@ export class CityWorld {
         return c.lerp(MUTED, .65);
       default:
         ramp(terrainStops, tile.height, c);
-        return (tile.x + tile.z) % 2 ? c.multiplyScalar(.965) : c;
+        if (!tile.water && this.city?.weather?.season === "summer") c.lerp(new THREE.Color("#b8ad65"), .38 * this.visualWeather.sun);
+        else if (!tile.water && this.city?.weather?.season === "autumn") c.lerp(new THREE.Color("#a99358"), .27);
+        if (!tile.water) c.lerp(PALE, .8 * this.visualWeather.snow);
+        if (!tile.water) c.multiplyScalar(groundVariation(
+          tile.x + (this.city?.district[0] ?? 0) * (this.city?.size ?? 100),
+          tile.z + (this.city?.district[1] ?? 0) * (this.city?.size ?? 100)));
+        return c;
     }
   }
 
@@ -1011,12 +1123,14 @@ export class CityWorld {
   }
 
   private lotColor(tile: Tile) {
-    const c = this.color.set(tile.kind === "road" ? roadType(tile).color : zoneColor(tile));
+    if (tile.kind === "road" && ["g", "c"].includes(tile.variant) && this.overlay === "normal") return this.terrainColor(tile);
+    const c = this.color.set(tile.kind === "road" ? roadType(tile).color : zoneColor({ kind: tile.rezoneKind ?? tile.kind, variant: tile.rezoneVariant ?? tile.variant }));
     if (this.overlay === "desirability") {
       const score = tile.desirability?.score;
       return c.set(score === undefined ? "#647574" : score < 40 ? "#d55948" : score < 50 ? "#eacb66" : score < 70 ? "#91bd75" : "#42bcaa");
     }
     if (this.overlay === "pollution") return ramp(pollutionRamp, tile.pollution, c);
+    if (this.overlay === "trash") return ramp(trashRamp, tile.trash ?? 0, c);
     if (this.overlay === "water") return c.set(tile.pipe ? "#20d6ed" : tile.kind === "waterworks" ?
       (tile.facility?.operating ? "#60ce8f" : "#d55948") : tile.waterService ?
       (tile.waterService.fraction >= .999 ? "#60ce8f" : tile.waterService.fraction > 0 ? "#eacb66" : "#d55948") : "#647574");
@@ -1049,7 +1163,9 @@ export class CityWorld {
     });
     const showsRadius = (tile: Tile) => {
       const selected = this.tool === "inspect" && this.selectedCell?.x === tile.x && this.selectedCell?.z === tile.z;
-      if (selected) return tile.kind === "service" || tile.kind === "park" || tile.kind === "power" && ["c", "n"].includes(tile.variant);
+      if (selected) return tile.kind === "service" || tile.kind === "park" || tile.kind === "landfill" || tile.kind === "power" && ["c", "n"].includes(tile.variant);
+      if (tile.kind === "service" && tile.variant === "w") return this.overlay === "pollution";
+      if (tile.kind === "landfill") return this.overlay === "pollution";
       return this.overlay === "desirability" && (tile.kind === "service" || tile.kind === "park" ||
         tile.kind === "power" && ["c", "n"].includes(tile.variant) && (tile.installationPart ?? -1) === 0);
     };
@@ -1079,7 +1195,7 @@ export class CityWorld {
       if (tile.kind === "empty") {
         if (!tile.water) {
           const start = trees.length, ox = city.district[0] * city.size, oz = city.district[1] * city.size;
-          wildTrees(tile.x + ox, tile.z + oz, tile.height, trees);
+          wildTrees(tile.x + ox, tile.z + oz, tile.height, trees, tile.trees);
           for (let j = start; j < trees.length; j++) { trees[j]!.x -= ox; trees[j]!.z -= oz; }
         }
         continue;
@@ -1091,8 +1207,11 @@ export class CityWorld {
         const service = subtype(tile);
         let radius = 2, ringX = cx, ringZ = cz;
         if (tile.kind === "service") {
-          radius = service === "f" ? 12 : 10;
+          radius = service === "f" ? 12 : service === "w" ? 8 : 10;
           this.color.set(service === "f" ? "#e2bc4f" : service === "p" ? "#5d8fd4" : "#65ad72");
+        } else if (tile.kind === "landfill") {
+          radius = 4;
+          this.color.set("#9a6948");
         } else if (tile.kind === "power") {
           radius = tile.variant === "n" ? 20 : 12;
           if (tile.variant === "n") {
@@ -1111,11 +1230,13 @@ export class CityWorld {
       if (tile.kind === "park" || (tile.kind !== "powerline" && models[i])) {
         for (let side = 0; side < 4; side++) {
           const sx = [0, 1, 0, -1][side]!, sz = [-1, 0, 1, 0][side]!;
-          if (city.tiles[(tile.z + sz) * city.size + tile.x + sx]?.kind !== "road" ||
+          if (!(["", "r", "s", "a", "e", "m"].includes(city.tiles[(tile.z + sz) * city.size + tile.x + sx]?.variant ?? "!")) ||
+            city.tiles[(tile.z + sz) * city.size + tile.x + sx]?.kind !== "road" ||
             tile.x + sx < 0 || tile.x + sx >= city.size) continue;
           const ax = Math.abs(sz), az = Math.abs(sx), road = (dx: number, dz: number) => {
             const nx = tile.x + dx, nz = tile.z + dz;
-            return nx >= 0 && nz >= 0 && nx < city.size && nz < city.size && city.tiles[nz * city.size + nx]?.kind === "road";
+            return nx >= 0 && nz >= 0 && nx < city.size && nz < city.size &&
+              city.tiles[nz * city.size + nx]?.kind === "road" && ["", "r", "s", "a", "e", "m"].includes(city.tiles[nz * city.size + nx]?.variant ?? "!");
           };
           // Where the pavement meets a side road, run it on to the far kerb so the two strips meet at the corner.
           walks.push([cx + sx * SIDEWALK_OUT, cz + sz * SIDEWALK_OUT, ax, az,
@@ -1127,7 +1248,7 @@ export class CityWorld {
       } else {
         const model = models[i];
         if (!model) continue;
-        const decay = tile.kind === "residential" || tile.kind === "power" || tile.kind === "powerline" ? 0 : (100 - tile.condition) / 100;
+        const decay = (tile.kind === "residential" && !(tile.trash ?? 0)) || tile.kind === "power" || tile.kind === "powerline" ? 0 : (100 - tile.condition) / 100;
         if (tile.kind === "power" && tile.variant === "w")
           this.windRotorPositions.push({ index: i, x: cx + WIND_ROTOR.x, y: base + WIND_ROTOR.y, z: cz + WIND_ROTOR.z, angle: rotorAngles.get(i) ?? 0 });
         // Every pane is drawn as glass; the ones with people behind them may also light up.
@@ -1392,10 +1513,12 @@ export class CityWorld {
       const mesh = this.crowns[lod]![tree.crown]!;
       dummy.position.set(tree.x, ground + tree.crownBase, tree.z);
       dummy.rotation.set(0, tree.yaw, 0);
-      dummy.scale.set(tree.width, tree.height - tree.crownBase, tree.width);
+      const leafless = this.city?.weather?.season === "winter" && tree.crown === 2;
+      dummy.scale.set(tree.width * (leafless ? .08 : 1), (tree.height - tree.crownBase) * (leafless ? .08 : 1), tree.width * (leafless ? .08 : 1));
       dummy.updateMatrix();
       mesh.setMatrixAt(mesh.count, dummy.matrix);
-      mesh.setColorAt(mesh.count++, this.color.set(tree.color).lerp(PALE, tint));
+      const seasonal = this.city?.weather?.season === "autumn" && tree.crown === 2 ? "#bd8e42" : tree.color;
+      mesh.setColorAt(mesh.count++, this.color.set(seasonal).lerp(PALE, tint));
       if (tree.crownBase <= 0 || lod === 2) continue;
       const girth = .05 + tree.width * .06;
       dummy.position.set(tree.x, ground - .05, tree.z);
@@ -1422,6 +1545,7 @@ export class CityWorld {
   }
 
   private cellsFor(a: Cell, b: Cell): Cell[] {
+    if (this.tool === "road" && (this.roadVariant === "m" || this.roadVariant === "x")) return [b];
     if (this.tool === "road" || this.tool === "powerline" || this.tool === "pipe" || this.tool === "remove_pipe") return roadLine(a, b);
     if (this.tool === "power" || this.tool === "waterworks") return [b];
     return this.tool === "level" ? levelRectangle(a, b) : rectangle(a, b);
@@ -1431,6 +1555,38 @@ export class CityWorld {
     let cells = this.anchor ? this.stroke : this.hovered ? [this.hovered] : [];
     let entrance: Cell | null = null;
     let invalidFacility = false;
+    if (this.tool === "road" && ["h", "m", "x"].includes(this.roadVariant) && cells.length) {
+      const footprint = new Map<string, Cell>();
+      const add = (x: number, z: number) => footprint.set(`${x},${z}`, { x, z });
+      if (this.roadVariant === "h") {
+        if (cells.length === 1) {
+          const { x, z } = cells[0]!;
+          cells = [-1, 0, 1].map(step => this.roadRotation % 2 === 0 ? { x: x + step, z } : { x, z: z + step });
+        }
+        cells.forEach((cell, i) => {
+          const before = cells[i - 1] ?? cell, after = cells[i + 1] ?? cell;
+          const horizontal = cells.length > 1 ? Math.abs(after.x - before.x) >= Math.abs(after.z - before.z) : this.roadRotation % 2 === 0;
+          for (let offset = -1; offset <= 1; offset++) add(cell.x + (horizontal ? 0 : offset), cell.z + (horizontal ? offset : 0));
+        });
+      } else if (this.roadVariant === "m") {
+        const { x, z } = cells[0]!;
+        const [dx, dz] = [[0, -1], [1, 0], [0, 1], [-1, 0]][this.roadRotation]!;
+        for (let distance = 1; distance <= 3; distance++) for (let offset = -1; offset <= 1; offset++)
+          add(x + dx! * distance + dz! * offset, z + dz! * distance - dx! * offset);
+      } else {
+        const { x, z } = cells[0]!;
+        for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++) add(x + dx, z + dz);
+      }
+      cells = [...footprint.values()];
+      if (this.city && cells.some(cell => cell.x < 0 || cell.z < 0 || cell.x >= this.city!.size || cell.z >= this.city!.size))
+        invalidFacility = true;
+      if (this.roadVariant === "m" && this.city) {
+        const anchor = this.anchor ? this.stroke[0]! : this.hovered!;
+        const tile = this.city.tiles[anchor.z * this.city.size + anchor.x];
+        invalidFacility ||= tile?.kind !== "road" || !["h", "v", "x"].includes(tile.variant) ||
+          tile.variant === "h" && this.roadRotation % 2 !== 0 || tile.variant === "v" && this.roadRotation % 2 === 0;
+      }
+    }
     if (this.tool === "waterworks" && cells.length) {
       const layout = facilityLayout(cells[cells.length - 1]!, this.facilityVariant, this.facilityRotation);
       cells = layout.cells;
@@ -1458,7 +1614,11 @@ export class CityWorld {
         if (!tile) continue;
         const terraform = this.tool === "raise" || this.tool === "lower" || this.tool === "level";
         const isEntrance = entrance === cell;
-        const blocked = tile.water && !terraform && this.tool !== "inspect" ||
+        const highwayBlocked = this.tool === "road" && ["h", "m", "x"].includes(this.roadVariant) &&
+          tile.kind !== "empty" && tile.kind !== "road" && !(tile.kind === "residential" || tile.kind === "commercial" || tile.kind === "industrial") ||
+          this.tool === "road" && ["h", "m", "x"].includes(this.roadVariant) && tile.level > 0 && tile.kind !== "road";
+        const blocked = tile.water && !terraform && this.tool !== "inspect" || highwayBlocked ||
+          this.tool === "road" && ["h", "m", "x"].includes(this.roadVariant) && invalidFacility ||
           (this.tool === "waterworks" && !isEntrance || this.tool === "power" && ["c", "n"].includes(this.powerVariant)) && invalidFacility;
         this.color.set(isEntrance ? (tile.kind === "road" ? "#8af595" : "#f0dc80") : blocked ? "#e0523d" : previewColors[this.tool] ?? colors[this.tool as keyof typeof colors] ?? "#ffffff");
         // Tall enough to stay visible above the uphill edge of a sloped tile.
@@ -1752,6 +1912,8 @@ export class CityWorld {
     const minute = fast ? DAY / 2 : ((clock % DAY) + DAY) % DAY;
     const visualClock = fast ? Math.floor(clock / DAY) * DAY + DAY / 2 : clock;
     this.light(minute);
+    this.blendWeather(seconds, now);
+    this.updatePrecipitation();
     if (this.detailed) {
       this.lightWindows(visualClock);
       this.puff(clock);
@@ -1779,4 +1941,44 @@ export class CityWorld {
     }
     this.renderer.render(this.scene, this.camera);
   };
+
+  private updatePrecipitation() {
+    const snow = this.visualWeather.snow > this.visualWeather.rain;
+    const strength = snow ? this.visualWeather.snow : this.visualWeather.rain;
+    this.precipitation.visible = strength > .02;
+    if (!this.precipitation.visible) return;
+    const material = this.precipitation.material as THREE.PointsMaterial;
+    material.color.set(snow ? "#ffffff" : "#a8c9e9");
+    material.size = snow ? .22 : .1;
+    material.opacity = .75 * strength;
+    const positions = this.precipitation.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const values = positions.array as Float32Array;
+    const target = this.controls.target, motion = this.effectTime * (snow ? 2 : 16);
+    const span = Math.min(1200, Math.max(58, this.camera.position.distanceTo(target) * 1.5));
+    for (let i = 0; i < 600; i++) {
+      const x = ((hash(i, 17) * span + (snow ? motion * .18 : motion * .35)) % span) - span / 2;
+      const z = hash(i, 29) * span - span / 2;
+      values[i * 3] = target.x + x;
+      values[i * 3 + 1] = Math.max(0, target.y) + ((hash(i, 37) * 24 - motion) % 24 + 24) % 24;
+      values[i * 3 + 2] = target.z + z;
+    }
+    positions.needsUpdate = true;
+  }
+
+  private blendWeather(seconds: number, now: number) {
+    const target = weatherStrengths(this.city?.weather);
+    const factor = 1 - Math.exp(-seconds / (this.speed === "day" ? 4 : .3));
+    for (const kind of ["sun", "rain", "snow"] as const)
+      this.visualWeather[kind] = Number.isFinite(this.visualWeather[kind])
+        ? this.visualWeather[kind] + (target[kind] - this.visualWeather[kind]) * factor : target[kind];
+    if (now - this.weatherPaintAt < 400) return;
+    this.weatherPaintAt = now;
+    const dry = this.city?.weather?.season === "summer" ? this.visualWeather.sun : this.city?.weather?.season === "autumn" ? .4 : 0;
+    this.regionRenderer.setWeather(this.visualWeather.snow, dry);
+    if (this.detailed && this.city) this.paintTerrain(this.city);
+    for (const neighbour of this.neighbours.values()) {
+      neighbour.world.visualWeather = { ...this.visualWeather };
+      if (neighbour.world.city) neighbour.world.paintTerrain(neighbour.world.city);
+    }
+  }
 }

@@ -25,6 +25,14 @@ const tile = (kind: Tile["kind"], level: number, x = 4, z = 7, variant = ""): Ti
   powerDemand: 0, powerSupply: 0, powerGrid: null, batteryCharge: 0,
 });
 
+test("landfill piles grow as their finite storage fills", () => {
+  const empty = buildingModel({ ...tile("landfill", 0), trash: 0 }, 42)!;
+  const full = buildingModel({ ...tile("landfill", 0), trash: 300 }, 42)!;
+  assert.equal(empty.name, "Landfill");
+  assert.ok(full.parts.length > empty.parts.length);
+  assert.ok(full.parts.some(part => part.height > .4));
+});
+
 test("offices are lit through the working day and shops until the evening", () => {
   const office = (minute: number) => Array.from({ length: 4000 }, (_, id) => windowLit(id, 5, minute, "work")).filter(Boolean).length / 4000;
   const shop = (minute: number) => Array.from({ length: 4000 }, (_, id) => windowLit(id, 5, minute, "shop")).filter(Boolean).length / 4000;

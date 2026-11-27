@@ -151,7 +151,7 @@ class Cell(BaseModel):
 
 class BuildRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    tool: Literal["road", "residential", "commercial", "industrial", "power", "park", "powerline",
+    tool: Literal["road", "residential", "commercial", "industrial", "power", "park", "landfill", "powerline",
                   "service", "bulldoze", "raise", "lower", "level", "waterworks", "pipe", "remove_pipe"]
     cells: list[Cell] = Field(min_length=1, max_length=400)
     variant: str | None = Field(default=None, max_length=1)

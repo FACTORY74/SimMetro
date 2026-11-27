@@ -11,6 +11,13 @@ export const TERRAIN_COLORS = [
   [18, "#8f8670"], [24, "#9a9488"], [30, "#e7ece8"], [96, "#ffffff"],
 ] as const;
 
+/** Stable, subtle land shade anchored to world tile coordinates. */
+export function groundVariation(x: number, z: number): number {
+  let value = Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ 0x5bd1e995;
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  return .94 + ((value ^ (value >>> 16)) >>> 0) / 0xffffffff * .12;
+}
+
 /** World-space Y of a terrain level. */
 export const groundY = (height: number) => height * LEVEL_HEIGHT;
 /** Height at which a pointer ray first meets a tile centre: land, or the water above a seabed. */

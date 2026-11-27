@@ -15,24 +15,34 @@ from backend.traffic import ROAD_CAPACITY, TrafficPlan, plan_traffic
 from backend.power import LINE_SPAN, PLANTS, STEP_MINUTES, PowerGrid
 from backend.terrain import SIZE, MIN_HEIGHT, MAX_HEIGHT, GENERATOR_VERSION, PERLIN_GENERATORS, world_heights
 from backend.catalogue import definitions
+from backend.weather import weather
 
 
 TILE_COUNT = SIZE * SIZE
 ORIGIN = 20  # Offset of the starter-town layout within a district.
 MAX_TERRAFORM_TILES = 4000
-SAVE_VERSION = 12
+SAVE_VERSION = 15
+LANDFILL_CAPACITY = 300
+LANDFILL_PLUME_RADIUS = 4
 POLLUTION_STEP_MINUTES = 360
+BACKGROUND_POLLUTION_REMOVAL = .07
+# Woodland is a useful natural resource, but it should complement rather than
+# replace removing nearby sources. Each tree adds a small local cleanup bonus.
+TREE_POLLUTION_REMOVAL = .03
+POLLUTION_DIFFUSION = .24
+COAL_PLUME_RADIUS = 5
+COAL_PLUME_SHARE = .75
 CODES = {"empty": ".", "road": "=", "residential": "r", "commercial": "c",
-         "industrial": "i", "power": "p", "park": "k", "powerline": "l", "waterworks": "w", "service": "s"}
+         "industrial": "i", "power": "p", "park": "k", "powerline": "l", "waterworks": "w", "service": "s", "landfill": "d"}
 # Subtypes, one character each; the first listed is the default.
 VARIANTS = {
     "waterworks": "pt",
-    "road": "rsae",       # local road, street, avenue, express road
+    "road": "rsaehvbmxjcg", # streets, highways, shoulders, ramps and interchanges
     "residential": "hml",   # high, medium and low density
     "commercial": "roe",    # retail, office, entertainment
     "industrial": "mtf",    # manufacturing, high tech, farming
     "power": "csnwb",       # coal, solar, nuclear, wind, battery
-    "service": "fpe",       # fire, police, education
+    "service": "fpew",      # fire, police, education, forester
 }
 # Highest development level and jobs per level, keyed by kind initial + variant.
 _BUILDINGS = definitions()
@@ -45,7 +55,7 @@ KINDS = set(CODES)
 COSTS = {"road": 12,
          **{kind: next(row["constructionCost"] for (row_kind, _), row in _BUILDINGS.items() if row_kind == kind)
             for kind in ("residential", "commercial", "industrial")},
-         "power": 900, "park": 60, "powerline": 15, "service": 800, "bulldoze": 5, "raise": 20, "lower": 20, "level": 20, "waterworks": 1000, "pipe": 3, "remove_pipe": 1}
+         "power": 900, "park": 60, "landfill": 35, "powerline": 15, "service": 800, "bulldoze": 5, "raise": 20, "lower": 20, "level": 20, "waterworks": 1000, "pipe": 3, "remove_pipe": 1}
 TERRAFORM = {"raise": 1, "lower": -1}
 ZONES = {"residential", "commercial", "industrial"}
 BUSINESSES = {"commercial", "industrial"}
@@ -64,6 +74,27 @@ def _adjacent(index: int) -> tuple[int, ...]:
 
 
 ADJ = tuple(_adjacent(i) for i in range(TILE_COUNT))
+FRONTAGE_ROADS = {"", "r", "s", "a", "e", "m"}
+
+
+def _road_link(a: "Tile", b: "Tile") -> bool:
+    """Highways only join streets through ramps and each other through interchanges."""
+    av, bv = a.variant, b.variant
+    if av in {"b", "g"} or bv in {"b", "g"}:
+        return False
+    if av in FRONTAGE_ROADS and bv in FRONTAGE_ROADS:
+        return True
+    if av == "m" or bv == "m":
+        return True
+    if av == "c" or bv == "c":
+        return av in {"c", "x", "j"} and bv in {"c", "x", "j"}
+    if av in FRONTAGE_ROADS or bv in FRONTAGE_ROADS:
+        return False
+    if av == "h" and a.z != b.z or bv == "h" and a.z != b.z:
+        return False
+    if av == "v" and a.x != b.x or bv == "v" and a.x != b.x:
+        return False
+    return av == bv or av in {"x", "j"} or bv in {"x", "j"}
 @dataclass(slots=True)
 class Tile:
     x: int
@@ -79,10 +110,14 @@ class Tile:
     condition: int = 100
     pollution: float = 0.0
     trees: int = 0
+    trash: int = 0
     variant: str = ""
     facility_id: int = 0
     facility_root: bool = False
     installation_part: int = -1
+    rezone_kind: str = ""
+    rezone_variant: str = ""
+    rezone_due: int = 0
 
     @property
     def subtype(self) -> str:
@@ -309,6 +344,7 @@ class City:
         self.power_clock = float(START_CLOCK)
         self._power_accumulator = 0.0
         self._pollution_accumulator = 0.0
+        self._trees_initialized = False
         self.power_history: list[dict] = []
         self._snapshot: dict | None = None
         heights = generate_heights(seed) if heights is None else heights
@@ -348,7 +384,11 @@ class City:
 
     def recalculate(self, refresh_power: bool = True):
         tiles = self.tiles
-        road = [t.kind == "road" for t in tiles]
+        road = [t.kind == "road" and t.variant not in {"b", "g"} for t in tiles]
+        frontage = [road[i] and t.variant in FRONTAGE_ROADS for i, t in enumerate(tiles)]
+        traffic_adj = tuple(tuple(j for j in ADJ[i] if road[j] and
+                                  (_road_link(t, tiles[j]) if road[i] else frontage[j]))
+                            for i, t in enumerate(tiles))
         queue = deque()
         components = [-1] * TILE_COUNT
         for start in range(TILE_COUNT):
@@ -358,12 +398,12 @@ class City:
             queue.append(start)
             while queue:
                 i = queue.popleft()
-                for j in ADJ[i]:
+                for j in traffic_adj[i]:
                     if road[j] and components[j] < 0:
                         components[j] = start
                         queue.append(j)
         for i, tile in enumerate(tiles):
-            tile.road_access = road[i] or any(road[j] for j in ADJ[i])
+            tile.road_access = road[i] or any(frontage[j] for j in ADJ[i])
             tile.connected = tile.road_access
         # A multi-tile installation is road-served when any footprint tile has
         # frontage; the generating root need not be the tile beside the road.
@@ -381,7 +421,7 @@ class City:
             self.grid.dispatch(self.power_clock)
         active = [t for t in tiles if t.kind in ZONES and t.road_access and t.powered]
         self._districts = {
-            t.z * SIZE + t.x: min(components[j] for j in ADJ[t.z * SIZE + t.x]
+            t.z * SIZE + t.x: min(components[j] for j in traffic_adj[t.z * SIZE + t.x]
                                  if components[j] >= 0)
             for t in active
         }
@@ -411,6 +451,7 @@ class City:
                 tile.workers += 1
             self._labor_surplus[district] = labor.get(district, 0) - available
         self._components = components
+        self._traffic_adj = traffic_adj
         if self._traffic is not None:
             self._traffic_stale = self._traffic
         self._traffic = None
@@ -420,12 +461,20 @@ class City:
         industrial_jobs = sum(t.job_capacity for t in active if t.kind == "industrial")
         self.jobs = commercial_jobs + industrial_jobs
         self.employed = sum(t.workers for t in active)
-        self._recalculate_trees()
+        if not self._trees_initialized:
+            self._recalculate_trees()
+            self._trees_initialized = True
+        else:
+            for tile in tiles:
+                if tile.kind == "park":
+                    tile.trees = 5
+                elif tile.kind != "empty" or tile.water or tile.height >= 30:
+                    tile.trees = 0
         self.income = self.population * 2 + sum(
             t.workers * t.condition // 100 for t in active if t.kind in BUSINESSES)
         self.expenses = sum(road_type(t).upkeep for t in tiles if t.kind == "road") + sum(
             PLANTS[t.subtype].upkeep for t in tiles if t.kind == "power" and t.installation_part <= 0) + sum(
-            8 if t.kind == "park" else 1 if t.kind == "powerline" else 0 for t in tiles)
+            8 if t.kind == "park" else 3 if t.kind == "landfill" else 1 if t.kind == "powerline" else 0 for t in tiles)
         self.expenses += sum(SERVICES[t.subtype].upkeep for t in tiles if t.kind == "service")
         self.expenses += sum(FACILITIES[f.variant].upkeep for f in self.facilities.values())
         self.water_network = WaterNetwork(self)
@@ -464,6 +513,50 @@ class City:
             else:
                 tile.trees = 0
 
+    def _advance_trees(self):
+        """Quarterly, simultaneous woodland succession on undeveloped land."""
+        previous = [t.trees if t.kind == "empty" else 0 for t in self.tiles]
+        changes = [0] * TILE_COUNT
+        for i, tile in enumerate(self.tiles):
+            if not previous[i]:
+                continue
+            pollution = tile.pollution
+            wx, wz = tile.x + self.district[0] * SIZE + self.seed, tile.z + self.district[1] * SIZE
+            # Even clean woods lose occasional trees; dirty air raises mortality.
+            death = .012 + .6 * (pollution / 100) ** 2
+            if self._tree_hash(wx, wz, self.tick * 7 + 101) < death:
+                changes[i] -= 1
+            if pollution >= 70:
+                continue
+            neighbours = ADJ[i]
+            target = neighbours[int(self._tree_hash(wx, wz, self.tick * 7 + 102) * len(neighbours))]
+            other = self.tiles[target]
+            if (other.kind != "empty" or other.water or other.height >= 30 or
+                    previous[target] or other.pollution >= 70):
+                continue
+            chance = .045 * (1 - pollution / 70) * (1 - other.pollution / 70)
+            if self._tree_hash(wx, wz, self.tick * 7 + 103) < chance:
+                changes[target] = 1
+        for tile, delta in zip(self.tiles, changes):
+            if delta:
+                tile.trees = max(0, min(3, tile.trees + delta))
+        # Foresters establish saplings and slowly thicken existing woodland.
+        for forester in self.tiles:
+            if forester.kind != "service" or forester.subtype != "w" or not forester.powered or not forester.road_access:
+                continue
+            radius = SERVICES["w"].radius
+            for z in range(max(0, forester.z - radius), min(SIZE, forester.z + radius + 1)):
+                for x in range(max(0, forester.x - radius), min(SIZE, forester.x + radius + 1)):
+                    if (x - forester.x) ** 2 + (z - forester.z) ** 2 > radius ** 2:
+                        continue
+                    tile = self.at(x, z)
+                    if tile.kind != "empty" or tile.water or tile.height >= 30 or tile.trees >= 3:
+                        continue
+                    chance = (.025 if tile.trees == 0 else .012) * max(0., 1 - tile.pollution / 80)
+                    wx, wz = x + self.district[0] * SIZE + self.seed, z + self.district[1] * SIZE
+                    if self._tree_hash(wx, wz, self.tick * 7 + 104) < chance:
+                        tile.trees += 1
+
     @staticmethod
     def _emissions(tile: Tile) -> float:
         """Pollution units emitted per game day by each occupied city element."""
@@ -471,33 +564,158 @@ class City:
         if tile.kind == "road": return {"r": .12, "s": .18, "a": .28, "e": .4}.get(tile.subtype, .12)
         if tile.kind == "residential": return .08 * level
         if tile.kind == "commercial": return .18 * level
-        if tile.kind == "industrial": return {"m": 8., "t": 1., "f": .35}.get(tile.subtype, 2.) * level
+        if tile.kind == "industrial": return {"m": 16., "t": 1., "f": .35}.get(tile.subtype, 2.) * level
         if tile.kind == "power":
             if tile.installation_part > 0 and not tile.facility_root: return 0.
-            return {"c": 18., "n": .6, "s": .08, "w": .04, "b": .08}.get(tile.subtype, .2)
+            return {"c": 240., "n": .6, "s": .08, "w": .04, "b": .08}.get(tile.subtype, .2)
+        if tile.kind == "landfill": return 30. * tile.trash / LANDFILL_CAPACITY
         return {"park": .02, "powerline": .01, "waterworks": .1, "service": .15}.get(tile.kind, 0.)
 
     def _advance_pollution(self, minutes: float) -> bool:
         """Emit, diffuse and remove pollution without changing gameplay consumers yet."""
         days = minutes / DAY_MINUTES
+        climate = self.weather()
+        diffusion = POLLUTION_DIFFUSION * (1 + .25 * climate["rain"] - .2 * climate["snow"])
+        weather_removal = .12 * climate["rain"] + .02 * climate["snow"]
         previous = [tile.pollution for tile in self.tiles]
+        plume = [0.] * TILE_COUNT
+        for source in self.tiles:
+            coal = source.kind == "power" and source.subtype == "c"
+            landfill = source.kind == "landfill" and source.trash > 0
+            if not (coal or landfill) or self._emissions(source) == 0:
+                continue
+            radius = COAL_PLUME_RADIUS if coal else LANDFILL_PLUME_RADIUS
+            share = COAL_PLUME_SHARE if coal else .7
+            weighted = []
+            for z in range(max(0, source.z - radius), min(SIZE, source.z + radius + 1)):
+                for x in range(max(0, source.x - radius), min(SIZE, source.x + radius + 1)):
+                    distance = math.hypot(x - source.x, z - source.z)
+                    if 0 < distance <= radius:
+                        weighted.append((z * SIZE + x, 1 / (1 + distance) ** 2))
+            total = sum(weight for _, weight in weighted)
+            for i, weight in weighted:
+                plume[i] += self._emissions(source) * days * share * weight / total
         changed = False
         for i, tile in enumerate(self.tiles):
             neighbours = ADJ[i]
             local = previous[i]
-            mixed = local * .88 + (sum(previous[j] for j in neighbours) / len(neighbours) if neighbours else local) * .12
-            # Background air clears slowly; trees are a substantially stronger local sink.
-            retained = math.exp(-days * (.07 + tile.trees * .10))
-            value = min(100., max(0., mixed * retained + self._emissions(tile) * days))
+            mixed = local * (1 - diffusion) + (sum(previous[j] for j in neighbours) / len(neighbours) if neighbours else local) * diffusion
+            retained = math.exp(-days * (BACKGROUND_POLLUTION_REMOVAL + weather_removal +
+                                         tile.trees * TREE_POLLUTION_REMOVAL))
+            emission = self._emissions(tile) * days
+            if tile.kind == "power" and tile.subtype == "c":
+                emission *= 1 - COAL_PLUME_SHARE
+            elif tile.kind == "landfill":
+                emission *= .3
+            value = min(100., max(0., mixed * retained + emission + plume[i]))
             changed |= abs(value - tile.pollution) > .0001
             tile.pollution = value
         return changed
+
+    def _advance_trash(self):
+        """Monthly generation and road-network collection; full dumps leave waste behind."""
+        def networks(i):
+            return {self._components[j] for j in self._traffic_adj[i] if self._components[j] >= 0}
+
+        dumps = [(tile, networks(i)) for i, tile in enumerate(self.tiles)
+                 if tile.kind == "landfill" and tile.road_access and tile.trash < LANDFILL_CAPACITY]
+        for i, tile in enumerate(self.tiles):
+            if tile.kind == "residential" and tile.residents:
+                tile.trash = min(1_000_000, tile.trash + max(1, tile.residents // 4))
+            elif tile.kind in BUSINESSES and tile.level and tile.workers:
+                tile.trash = min(1_000_000, tile.trash + max(1, tile.workers // 3))
+            if not tile.trash or tile.kind == "landfill":
+                continue
+            if tile.road_access:
+                source_networks = networks(i)
+                for dump, dump_networks in dumps:
+                    if not source_networks.intersection(dump_networks):
+                        continue
+                    moved = min(tile.trash, LANDFILL_CAPACITY - dump.trash)
+                    dump.trash += moved
+                    tile.trash -= moved
+                    if not tile.trash:
+                        break
+            if tile.trash >= 10 and tile.kind != "empty":
+                tile.condition = max(0, tile.condition - min(25, max(1, tile.trash // 10)))
+                if tile.kind == "residential" and tile.condition < 40:
+                    tile.occupants = max(0, tile.occupants - max(1, tile.occupants // 10))
 
     def _changed(self, terrain: bool = False):
         self.revision += 1
         if terrain:
             self.terrain_revision += 1
         self.recalculate()
+
+    def _build_highway(self, cells: list[tuple[int, int]], variant: str, rotation: int):
+        """Lay three-wide highway corridors, access ramps or a nine-wide interchange."""
+        if variant in {"m", "x"} and len(cells) != 1:
+            raise ValueError("Place one ramp or interchange at a time.")
+        layout: dict[tuple[int, int], str] = {}
+        if variant == "h":
+            if len(cells) == 1:
+                x, z = cells[0]
+                cells = [(x + step, z) if rotation % 2 == 0 else (x, z + step)
+                         for step in (-1, 0, 1)]
+            for i, (x, z) in enumerate(cells):
+                before = cells[i - 1] if i else (x, z)
+                after = cells[i + 1] if i + 1 < len(cells) else (x, z)
+                bend = before[0] != after[0] and before[1] != after[1]
+                horizontal = abs(after[0] - before[0]) >= abs(after[1] - before[1]) if len(cells) > 1 else rotation % 2 == 0
+                direction = "h" if horizontal else "v"
+                for offset in (-1, 0, 1):
+                    point = (x, z + offset) if horizontal else (x + offset, z)
+                    layout.setdefault(point, "b")
+                layout[x, z] = "x" if bend else direction
+        elif variant == "m":
+            x, z = cells[0]
+            if self.at(x, z).kind != "road" or self.at(x, z).variant not in {"h", "v", "x"}:
+                raise ValueError("Start a ramp on a highway centre lane or interchange.")
+            if (self.at(x, z).variant == "h" and rotation % 2 != 0 or
+                    self.at(x, z).variant == "v" and rotation % 2 == 0):
+                raise ValueError("A ramp must leave the side of its highway.")
+            dx, dz = ((0, -1), (1, 0), (0, 1), (-1, 0))[rotation]
+            for distance in range(1, 4):
+                for offset in (-1, 0, 1):
+                    layout[x + dx * distance + dz * offset, z + dz * distance - dx * offset] = "m" if offset == 0 else "b"
+        else:
+            x, z = cells[0]
+            for dz in range(-4, 5):
+                for dx in range(-4, 5):
+                    layout[x + dx, z + dz] = "g"
+                    if abs(dx) <= 1 or abs(dz) <= 1:
+                        layout[x + dx, z + dz] = "b"
+                    if dx == 0 or dz == 0:
+                        layout[x + dx, z + dz] = "x"
+            layout[x, z] = "j"
+            for sx, sz in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                for dx, dz in ((sx, 3 * sz), (2 * sx, 3 * sz), (3 * sx, 3 * sz), (3 * sx, 2 * sz), (3 * sx, sz)):
+                    layout[x + dx, z + dz] = "c"
+        for (x, z), kind in list(layout.items()):
+            if not (0 <= x < SIZE and 0 <= z < SIZE):
+                raise ValueError("The highway footprint extends outside the city.")
+            tile = self.at(x, z)
+            if tile.water or tile.kind not in {"empty", "road"} and not (tile.kind in ZONES and tile.level == 0):
+                raise ValueError("Highways need clear, dry ground across their full footprint.")
+            if kind in {"b", "g"} and tile.kind == "road" and tile.variant in {"h", "v", "x", "j", "c", "m"}:
+                del layout[x, z]  # Keep lanes where corridors overlap.
+            elif kind in {"b", "g"} and tile.kind == "road" and tile.variant not in {"b", "g"}:
+                raise ValueError("A highway shoulder cannot replace an existing street.")
+            elif kind in {"h", "v"} and tile.kind == "road" and tile.variant in {"h", "v"} and tile.variant != kind:
+                layout[x, z] = "x"
+        changes = [(self.at(x, z), kind) for (x, z), kind in layout.items()
+                   if self.at(x, z).kind != "road" or self.at(x, z).variant != kind]
+        cost = sum(ROADS[kind].cost for _, kind in changes)
+        if cost > self.money:
+            raise ValueError(f"Insufficient funds: this highway costs ${cost:,}.")
+        for tile, kind in changes:
+            tile.kind, tile.variant, tile.level = "road", kind, 0
+            tile.condition, tile.workers, tile.occupants, tile.trash = 100, 0, 0, 0
+            tile.rezone_kind, tile.rezone_variant, tile.rezone_due = "", "", 0
+        if changes:
+            self.money -= cost
+            self._changed()
+        return cost
 
     def build(self, tool: str, cells: list[tuple[int, int]], variant: str | None = None, *, preserve_border: bool = False, rotation: int = 0):
         if tool not in COSTS:
@@ -513,6 +731,10 @@ class City:
         for x, z in unique:
             if not (0 <= x < SIZE and 0 <= z < SIZE):
                 raise ValueError("Construction is outside the city boundary.")
+        if tool == "road" and variant in {"h", "m", "x"}:
+            return self._build_highway(unique, variant, rotation)
+        if tool == "road" and variant in {"v", "b", "j", "c", "g"}:
+            raise ValueError("Choose Highway, Ramp or Highway junction to lay this road type.")
         if tool in ("waterworks", "pipe", "remove_pipe"):
             return build_water(self, tool, unique, variant, rotation, SIZE)
         installation = _BUILDINGS.get((tool, variant), {}).get("installation")
@@ -585,18 +807,26 @@ class City:
         for x, z in unique:
             tile = self.at(x, z)
             if tile.water:
+                if tool in ZONES or tool == "landfill":
+                    continue
                 raise ValueError("Cannot build on water. Raise the terrain first.")
+            if (tool in ZONES or tool == "landfill") and tile.kind not in ZONES and tile.kind != "empty":
+                continue
+            if tool == "landfill" and tile.kind in ZONES:
+                continue
             if tool == "bulldoze":
                 if tile.kind != "empty":
                     targets.append(tile)
             elif tool == "powerline" and tile.kind == "road":
                 continue  # The span crosses the road without replacing it with a support.
-            elif tile.kind == tool and tile.subtype == variant:
+            elif tile.kind == tool and tile.subtype == variant and not tile.rezone_kind:
                 continue
+            elif tile.rezone_kind == tool and tile.rezone_variant == variant:
+                continue
+            elif tool in ZONES and tile.kind in ZONES:
+                targets.append(tile)
             elif tool == "road" and tile.kind in ZONES and not tile.level:
                 targets.append(tile)    # Reserved but undeveloped land is clear for a road.
-            elif tool in ZONES and tile.kind in ZONES and not tile.level:
-                targets.append(tile)    # Any undeveloped zone category/subtype may be repainted.
             elif tile.kind == tool and (tool == "road" or tool in ZONES and not tile.level):
                 targets.append(tile)
             elif tile.kind != "empty":
@@ -608,12 +838,21 @@ class City:
         if cost > self.money:
             raise ValueError(f"Insufficient funds: this stroke costs ${cost:,}.")
         for tile in targets:
+            if tool in ZONES and tile.kind in ZONES and tile.level:
+                if tile.kind == tool and tile.subtype == variant:
+                    tile.rezone_kind, tile.rezone_variant, tile.rezone_due = "", "", 0
+                else:
+                    tile.rezone_kind, tile.rezone_variant = tool, variant
+                    tile.rezone_due = self.tick + 1 + int(self._tree_hash(tile.x + self.seed, tile.z, self.tick + 211) * 12)
+                continue
             tile.kind = "empty" if tool == "bulldoze" else tool
             tile.variant = "" if tool == "bulldoze" else variant
             tile.level = 0
             tile.condition = 100
             tile.workers = 0
             tile.occupants = 0
+            tile.trash = 0
+            tile.rezone_kind, tile.rezone_variant, tile.rezone_due = "", "", 0
             self.water_shortages.pop(tile.z * SIZE + tile.x, None)
             self.desirability_state.pop(tile.z * SIZE + tile.x, None)
             self.desirability_samples.pop(tile.z * SIZE + tile.x, None)
@@ -704,6 +943,8 @@ class City:
 
     def advance(self):
         self.tick += 1
+        if self.tick % 3 == 0:
+            self._advance_trees()
         suitability = commit_desirability(self)
         for i, tile in enumerate(self.tiles):
             if tile.kind not in ZONES:
@@ -735,7 +976,7 @@ class City:
                     tile.condition = max(0, tile.condition - 4)
         # Stable integer noise makes saves replayable without serializing RNG state.
         for tile in self.tiles:
-            if tile.kind not in ZONES or not tile.powered or not tile.road_access or not suitability[str(tile.z * SIZE + tile.x)]["eligible"]:
+            if tile.kind not in ZONES or tile.rezone_kind or not tile.powered or not tile.road_access or not suitability[str(tile.z * SIZE + tile.x)]["eligible"]:
                 continue
             if tile.kind in BUSINESSES:
                 district = self._districts[tile.z * SIZE + tile.x]
@@ -759,6 +1000,20 @@ class City:
             if row["eligible"]:
                 tile.occupants += min(tile.level * tile.residents_per_level - tile.occupants, 1 + int((row["score"] - 50) // 15))
         self.water_grace = max(0, self.water_grace - 1)
+        self._advance_trash()
+        for tile in self.tiles:
+            if not tile.rezone_kind or tile.rezone_due > self.tick:
+                continue
+            old_kind = tile.kind
+            tile.kind, tile.variant = tile.rezone_kind, tile.rezone_variant
+            tile.level = min(tile.level, tile.max_level)
+            tile.occupants = min(tile.occupants, tile.level * tile.residents_per_level) if old_kind == "residential" and tile.kind == "residential" else 0
+            tile.workers = 0
+            tile.condition = 100
+            tile.rezone_kind, tile.rezone_variant, tile.rezone_due = "", "", 0
+            index = tile.z * SIZE + tile.x
+            self.desirability_state.pop(index, None)
+            self.desirability_samples.pop(index, None)
         self.recalculate()
         self.money += self.income - self.expenses
         self.revision += 1
@@ -833,7 +1088,7 @@ class City:
 
     def traffic(self) -> TrafficPlan:
         if self._traffic is None:
-            plan = plan_traffic(self.tiles, ADJ, self._components, self._districts, SIZE)
+            plan = plan_traffic(self.tiles, self._traffic_adj, self._components, self._districts, SIZE)
             digest = hash((tuple(plan.trips), tuple(plan.minutes)))
             if digest != self._traffic_digest:
                 self._traffic_digest = digest
@@ -891,7 +1146,13 @@ class City:
         if not self._snapshot or self._snapshot["revision"] != self.revision:
             self._snapshot = self._build_snapshot()
         # The clock moves continuously, so it is never served from the cache.
-        return {**self._snapshot, "clock": round(self.clock, 2)}
+        return {**self._snapshot, "clock": round(self.clock, 2), "weather": self.weather()}
+
+    def weather(self):
+        clock = self.clock
+        if self.speed in (1, 3):
+            clock = self._fast_seconds / (FAST_MONTH_SECONDS / self.speed) * MONTH_MINUTES
+        return weather(self.seed, self.tick, clock)
 
     def _build_snapshot(self):
         tiles = self.tiles
@@ -932,6 +1193,10 @@ class City:
                 "traffic": traffic.volume,
                 "pollution": [round(t.pollution, 2) for t in tiles],
                 "trees": [t.trees for t in tiles],
+                "trash": [t.trash for t in tiles],
+                "rezone_kind": "".join(CODES[t.rezone_kind] if t.rezone_kind else "." for t in tiles),
+                "rezone_variant": "".join(t.rezone_variant or "." for t in tiles),
+                "rezone_due": [t.rezone_due for t in tiles],
                 "power_demand": [round(self.grid.loads.get(i, 0), 3) for i in range(TILE_COUNT)],
                 "power_supply": [round(self.grid.outputs.get(i, 0), 3) for i in range(TILE_COUNT)],
                 "power_grid": [self.grid.grid_of.get(i, -1) for i in range(TILE_COUNT)],
@@ -946,6 +1211,9 @@ class City:
                 "fast_seconds": self._fast_seconds,
                 "money": self.money, "speed": self.speed, "clock": self.clock,
                 "pollution": [t.pollution for t in self.tiles],
+                "trees": [t.trees for t in self.tiles],
+                "trash": [t.trash for t in self.tiles],
+                "rezoning": [[i, t.rezone_kind, t.rezone_variant, t.rezone_due] for i, t in enumerate(self.tiles) if t.rezone_kind],
                 "pollution_accumulator": self._pollution_accumulator,
                 "heights": [t.height for t in self.tiles],
                 "kinds": "".join(CODES[t.kind] for t in self.tiles),
@@ -973,7 +1241,7 @@ class City:
         if data.get("version") == 1:
             raise ValueError("This save is from the earlier 40 × 40 map and is not compatible "
                              "with the 100 x 100 district map.")
-        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SAVE_VERSION):
+        if data.get("version") not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, SAVE_VERSION):
             raise ValueError("Unsupported save format.")
         if isinstance(data.get("heights"), list) and len(data["heights"]) == 200 * 200:
             data = expand_legacy_map(data)
@@ -1016,6 +1284,14 @@ class City:
         city._pollution_accumulator = float(pollution_accumulator)
         for tile, value in zip(city.tiles, pollution):
             tile.pollution = float(value)
+        saved_trees = data.get("trees") if data["version"] >= 13 else None
+        if saved_trees is not None and (not isinstance(saved_trees, list) or len(saved_trees) != TILE_COUNT or
+                any(type(n) is not int or not 0 <= n <= 5 for n in saved_trees)):
+            raise ValueError("Invalid saved woodland state.")
+        trash = data.get("trash", [0] * TILE_COUNT) if data["version"] >= 15 else [0] * TILE_COUNT
+        if (not isinstance(trash, list) or len(trash) != TILE_COUNT or
+                any(type(n) is not int or not 0 <= n <= 1_000_000 for n in trash)):
+            raise ValueError("Invalid saved trash state.")
         conditions = data.get("conditions") if data["version"] >= 3 else [100] * TILE_COUNT
         if (not isinstance(conditions, list) or len(conditions) != TILE_COUNT or
                 any(type(c) is not int or not 0 <= c <= 100 for c in conditions)):
@@ -1049,6 +1325,9 @@ class City:
                 raise ValueError("Invalid saved residents.")
             tile.occupants = count
             tile.condition = conditions[i]
+            if kind == "landfill" and trash[i] > LANDFILL_CAPACITY:
+                raise ValueError("Landfill exceeds capacity.")
+            tile.trash = trash[i]
         roots = data.get("power_installations", [])
         if not isinstance(roots, list) or any(type(i) is not int or not 0 <= i < TILE_COUNT for i in roots):
             raise ValueError("Invalid power installations.")
@@ -1071,7 +1350,7 @@ class City:
                                 _BUILDINGS.get(("power", t.subtype), {}).get("installation") and
                                 t.installation_part < 0]
         if legacy_installations:
-            if data["version"] == SAVE_VERSION:
+            if data["version"] >= 12:
                 raise ValueError("Power tiles must belong to an installation.")
             # Earlier single-tile stations remain valid compact legacy plants.
             for tile in legacy_installations:
@@ -1093,6 +1372,32 @@ class City:
             ):
                 raise ValueError("Invalid saved power history entry.")
         city.tick, city.money, city.speed = data["tick"], data["money"], data["speed"]
+        rezoning = data.get("rezoning", []) if data["version"] < 14 else data.get("rezoning")
+        if not isinstance(rezoning, list):
+            raise ValueError("Invalid saved rezoning state.")
+        seen_rezones = set()
+        for row in rezoning:
+            if not isinstance(row, list) or len(row) != 4:
+                raise ValueError("Invalid saved rezoning state.")
+            index, kind, variant, due = row
+            if (type(index) is not int or not 0 <= index < TILE_COUNT or index in seen_rezones or
+                    type(kind) is not str or kind not in ZONES or type(variant) is not str or
+                    variant not in VARIANTS[kind] or type(due) is not int or
+                    not city.tick < due <= city.tick + 12):
+                raise ValueError("Invalid saved rezoning state.")
+            tile = city.tiles[index]
+            if tile.kind not in ZONES or not tile.level or (tile.kind == kind and tile.subtype == variant):
+                raise ValueError("Invalid saved rezoning tile.")
+            tile.rezone_kind, tile.rezone_variant, tile.rezone_due = kind, variant, due
+            seen_rezones.add(index)
+        if saved_trees is not None:
+            for tile, count in zip(city.tiles, saved_trees):
+                if ((tile.kind == "park" and count != 5) or
+                        (tile.kind not in ("park", "empty") and count != 0) or
+                        (tile.kind == "empty" and (count > 3 or
+                         count > 0 and (tile.water or tile.height >= 30)))):
+                    raise ValueError("Invalid saved woodland tile.")
+                tile.trees = count
         city.clock = float(clock)
         city.history = [dict(entry) for entry in history]
         if data["version"] >= 5:

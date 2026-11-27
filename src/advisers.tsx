@@ -20,6 +20,9 @@ export function adviserReports(city: CityState): Record<AdviserId, AdviserReport
   const pollution = city.tiles.reduce((sum, tile) => sum + tile.pollution, 0) / Math.max(1, city.tiles.length);
   const polluted = city.tiles.filter(tile => tile.pollution >= 20).length;
   const trees = city.tiles.reduce((sum, tile) => sum + tile.trees, 0);
+  const trash = city.tiles.reduce((sum, tile) => sum + (tile.kind === "landfill" ? 0 : tile.trash ?? 0), 0);
+  const landfill = city.tiles.filter(tile => tile.kind === "landfill");
+  const remaining = landfill.reduce((sum, tile) => sum + Math.max(0, 300 - (tile.trash ?? 0)), 0);
   return {
     planning: {
       headline: declining ? `${declining} neighbourhoods are declining` : unsuitable ? `${unsuitable} zoned lots need attention` : "Development locations look healthy",
@@ -32,9 +35,9 @@ export function adviserReports(city: CityState): Record<AdviserId, AdviserReport
       metric: `${net >= 0 ? "+" : "−"}$${Math.abs(net).toLocaleString()}/month`, tone: net < 0 ? "urgent" : city.money < city.expenses * 3 ? "watch" : "good", overlay: "zones",
     },
     health: {
-      headline: polluted ? `${polluted} tiles have elevated pollution` : "Air quality is currently good",
-      detail: polluted ? "Reduce the strongest emitters and preserve woodland near affected neighbourhoods. Trees accelerate local dissipation." : "Pollution remains low. Existing trees are providing ongoing environmental capacity.",
-      metric: `${pollution.toFixed(1)} avg · ${trees.toLocaleString()} trees`, tone: polluted > 30 ? "urgent" : polluted ? "watch" : "good", overlay: "pollution",
+      headline: trash ? `${trash.toLocaleString()} trash units are uncollected` : polluted ? `${polluted} tiles have elevated pollution` : "Air quality is currently good",
+      detail: trash ? `Add road-connected landfill capacity. ${remaining.toLocaleString()} units remain; accumulated trash damages buildings.` : polluted ? "Reduce the strongest emitters and preserve woodland near affected neighbourhoods. Trees accelerate local dissipation." : "Pollution remains low. Existing trees are providing ongoing environmental capacity.",
+      metric: trash ? `${trash.toLocaleString()} backlog · ${remaining.toLocaleString()} capacity` : `${pollution.toFixed(1)} avg · ${trees.toLocaleString()} trees`, tone: trash ? "urgent" : polluted > 30 ? "urgent" : polluted ? "watch" : "good", overlay: trash ? "trash" : "pollution",
     },
     industry: {
       headline: city.congested ? `${city.congested} road tiles are congested` : city.vacancies > city.workforce ? "Employers need a larger workforce" : "Industry and transport are moving",

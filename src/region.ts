@@ -1,13 +1,15 @@
 import * as THREE from "three";
-import { LEVEL_HEIGHT, TERRAIN_COLORS } from "./terrain.ts";
+import { wildTreeCount } from "./nature.ts";
+import { LEVEL_HEIGHT, TERRAIN_COLORS, groundVariation } from "./terrain.ts";
 import { zoneColors } from "./types.ts";
 import { attachDesirability, type DesirabilityData, attachWater, type WaterData, type CityState, type Kind, type Tile } from "./types.ts";
 
 export interface DistrictDetail {
   seed: number; heights: number[]; terrainRevision: number; stamp: string;
-  lots: [number, number, Kind, string, number, number, number, boolean, boolean, number, number?][];
+  lots: [number, number, Kind, string, number, number, number, boolean, boolean, number, number?, string?, string?, number?, number?][];
   pollution?: number[] | null;
   trees?: number[] | null;
+  trash?: number[] | null;
   desirability?: DesirabilityData;
   water?: WaterData;
   powerLines: [number, number][];
@@ -28,11 +30,15 @@ export function detailedCity(tile: RegionTile, focus: CityState): CityState {
   const tiles: Tile[] = data.heights.map((height, i) => ({
     x: i % focus.size, z: Math.floor(i / focus.size), height, water: height < 0,
     kind: "empty", variant: "", level: 0, condition: 100, workers: 0, residents: 0,
-    powered: false, connected: false, traffic: 0, pollution: data.pollution?.[i] ?? 0, trees: data.trees?.[i] ?? 0, powerDemand: 0, powerSupply: 0, installationPart: -1,
+    powered: false, connected: false, traffic: 0, pollution: data.pollution?.[i] ?? 0,
+    trees: data.trees?.[i] ?? wildTreeCount(tile.x * focus.size + i % focus.size, tile.z * focus.size + Math.floor(i / focus.size), height),
+    trash: data.trash?.[i] ?? 0,
+    powerDemand: 0, powerSupply: 0, installationPart: -1,
     powerGrid: null, batteryCharge: 0,
   }));
-  for (const [x, z, kind, variant, level, condition, workers, powered, connected, residents, installationPart] of data.lots)
-    Object.assign(tiles[z * focus.size + x]!, { kind, variant, level, condition, workers, powered, connected, residents, installationPart });
+  for (const [x, z, kind, variant, level, condition, workers, powered, connected, residents, installationPart, rezoneKind, rezoneVariant, rezoneDue, trash] of data.lots)
+    Object.assign(tiles[z * focus.size + x]!, { kind, variant, level, condition, workers, powered, connected, residents, installationPart,
+      rezoneKind: rezoneKind || undefined, rezoneVariant: rezoneVariant || undefined, rezoneDue: rezoneDue || undefined, trash: trash ?? 0 });
   return { ...focus, desirability: data.desirability, water: data.water, district: [tile.x, tile.z], seed: data.seed, tiles: attachDesirability(attachWater(tiles, focus.size, data.water), data.desirability),
     terrainRevision: data.terrainRevision, terrainEdges: data.edges ?? null, powerLines: data.powerLines, trafficRevision: -1 };
 }
@@ -54,13 +60,14 @@ function tint(h: number) {
     const [a, ca] = stops[i - 1]!, [b, cb] = stops[i]!;
     if (h <= b) return ca.clone().lerp(cb, Math.max(0, (h - a) / (b - a)));
   }
-  return stops[stops.length - 1]![1];
+  return stops[stops.length - 1]![1].clone();
 }
 
 /** Coarse interiors with full-resolution borders. All LODs share the same
  * half-cell border vertices, including the detailed city's terrain fan. */
 export function regionGeometry(tile: RegionTile, size: number) {
-  const positions: number[] = [], colors: number[] = [];
+  const positions: number[] = [], colors: number[] = [], shades: number[] = [];
+  let shade = 1;
   const n = size / tile.step + 1;
   const vertex = (x: number, z: number): [number, number, number] => {
     let h: number;
@@ -73,9 +80,12 @@ export function regionGeometry(tile: RegionTile, size: number) {
   };
   const put = ([x, h, z]: [number, number, number]) => {
     positions.push(x, h * LEVEL_HEIGHT, z);
-    const c = tint(h); colors.push(c.r, c.g, c.b);
+    const c = tint(h);
+    colors.push(c.r, c.g, c.b);
+    shades.push(h >= 0 ? shade : 1);
   };
   for (let z = 0; z < size; z += tile.step) for (let x = 0; x < size; x += tile.step) {
+    shade = groundVariation(tile.x * size + x, tile.z * size + z);
     const s = tile.step, ring: [number, number, number][] = [];
     const corners: [number, number][] = [[x, z], [x, z + s], [x + s, z + s], [x + s, z]];
     for (let side = 0; side < 4; side++) {
@@ -94,6 +104,7 @@ export function regionGeometry(tile: RegionTile, size: number) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute("shade", new THREE.Float32BufferAttribute(shades, 1));
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
   return geometry;
@@ -104,7 +115,9 @@ export class RegionRenderer {
   private readonly ground = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
   private readonly buildingMaterial = new THREE.MeshStandardMaterial({ roughness: 1 });
   private readonly box = new THREE.BoxGeometry(1, 1, 1);
-  private tiles = new Map<string, { stamp: string; group: THREE.Group; terrain: THREE.Mesh; buildings: THREE.InstancedMesh }>();
+  private tiles = new Map<string, { stamp: string; group: THREE.Group; terrain: THREE.Mesh; buildings: THREE.InstancedMesh; baseColors: Float32Array }>();
+  private snow = 0;
+  private dry = 0;
   private readonly boundaryMaterial = new THREE.LineBasicMaterial({ color: "#fff2a8", transparent: true, opacity: .85 });
   private readonly boundaries = new THREE.Group();
   private showBoundaries = false;
@@ -120,6 +133,35 @@ export class RegionRenderer {
     this.buildingMaterial.opacity = ghosted ? .5 : 1;
     this.buildingMaterial.depthWrite = !ghosted;
     this.buildingMaterial.needsUpdate = true;
+  }
+
+  setWeather(snow: number, dry: number) {
+    this.snow = Number.isFinite(snow) ? snow : 0;
+    this.dry = Number.isFinite(dry) ? dry : 0;
+    for (const tile of this.tiles.values()) this.tintWeather(tile);
+  }
+
+  private tintWeather(tile: { terrain: THREE.Mesh; baseColors: Float32Array }) {
+    const colors = tile.terrain.geometry.getAttribute("color") as THREE.BufferAttribute;
+    const heights = tile.terrain.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const shades = tile.terrain.geometry.getAttribute("shade") as THREE.BufferAttribute;
+    const values = colors.array as Float32Array, base = tile.baseColors;
+    const snow = Math.min(1, this.snow * .85), dry = Math.min(1, this.dry * .4);
+    for (let i = 0; i < heights.count; i++) {
+      const k = i * 3;
+      if (heights.getY(i) < 0) { values[k] = base[k]!; values[k + 1] = base[k + 1]!; values[k + 2] = base[k + 2]!; continue; }
+      values[k] = base[k]! * (1 - dry) + .55 * dry;
+      values[k + 1] = base[k + 1]! * (1 - dry) + .50 * dry;
+      values[k + 2] = base[k + 2]! * (1 - dry) + .28 * dry;
+      values[k] = values[k]! * (1 - snow) + .83 * snow;
+      values[k + 1] = values[k + 1]! * (1 - snow) + .86 * snow;
+      values[k + 2] = values[k + 2]! * (1 - snow) + .85 * snow;
+      const shade = shades.getX(i);
+      values[k] = values[k]! * shade;
+      values[k + 1] = values[k + 1]! * shade;
+      values[k + 2] = values[k + 2]! * shade;
+    }
+    colors.needsUpdate = true;
   }
 
   private rebuildBoundaries(view: RegionView) {
@@ -170,7 +212,10 @@ export class RegionRenderer {
             kind === "commercial" ? "#8daebc" : kind === "park" ? "#63985b" : "#b4a48d"));
         });
         group.add(terrain, buildings); this.group.add(group);
-        cached = { stamp, group, terrain, buildings }; this.tiles.set(key, cached);
+        cached = { stamp, group, terrain, buildings,
+          baseColors: (terrain.geometry.getAttribute("color").array as Float32Array).slice() };
+        this.tiles.set(key, cached);
+        this.tintWeather(cached);
       }
       cached.group.position.set((tile.x - view.focus[0]) * view.size, 0, (tile.z - view.focus[1]) * view.size);
       cached.group.visible = !(detailed && ((tile.x === view.focus[0] && tile.z === view.focus[1]) || neighbours.has(key)));

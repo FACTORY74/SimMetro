@@ -206,6 +206,20 @@ interface Facade {
 
 export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
   const kind = tile.kind;
+  if (kind === "landfill") {
+    const fill = Math.min(1, (tile.trash ?? 0) / 300);
+    const parts: BuildingPart[] = [
+      { x: 0, z: 0, bottom: 0, width: .92, depth: .92, height: .06, color: "#645c48" },
+      { x: 0, z: 0, bottom: .06, width: .84, depth: .84, height: .03, color: "#8a7652" },
+    ];
+    if (fill > 0) {
+      parts.push({ x: -.12, z: -.08, bottom: .09, width: .58, depth: .5,
+        height: .08 + fill * .36, color: "#776d51" });
+      parts.push({ x: .22, z: .19, bottom: .09, width: .34, depth: .32,
+        height: .06 + fill * .2, color: "#948259" });
+    }
+    return { name: "Landfill", parts, windows: [], chimneys: [] };
+  }
   if (kind === "waterworks") {
     const f = tile.facility;
     if (!f || tile.x !== f.x || tile.z !== f.z) return null;
@@ -275,6 +289,15 @@ export function buildingModel(tile: Tile, seed: number): BuildingModel | null {
     const parts: BuildingPart[] = [];
     const add = (x: number, z: number, bottom: number, width: number, depth: number, height: number, color: string) =>
       parts.push({ x, z, bottom, width, depth, height, color });
+    if (variant === "w") {
+      add(0, 0, 0, .82, .72, .08, "#8c927a");
+      add(0, .08, .08, .58, .45, .36, "#9b7954");
+      add(0, .08, .44, .68, .55, .12, "#426448");
+      add(0, -.16, .08, .18, .18, .13, "#d4bd73");
+      add(-.28, -.27, .08, .12, .12, .48, "#694d36");
+      add(-.28, -.27, .52, .28, .28, .35, "#4a8050");
+      return { name: "Forester", parts, windows: [], chimneys: [] };
+    }
     const accent = variant === "f" ? "#d9ad3d" : variant === "p" ? "#4f79b5" : "#5f9d68";
     add(0, 0, 0, .88, .82, .08, "#969b98");
     add(0, .04, .08, .72, .62, .48, variant === "e" ? "#d1c6a4" : "#b9c5c3");
